@@ -1,0 +1,586 @@
+---
+title: "community_types-NMDS_cluster"
+author: "Kelsey Elwood"
+date: "3/9/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script looks at the vegetation abundance surveys to better understand possible community groupings and/or plot similarities.
+
+# Load libraries
+```{r libraries}
+library(tidyr) # for spread function
+library(dplyr) # for piping and data manipulation
+library(ggplot2) # for figures
+library(nlme) # for lme
+library(vegan) # for PERMANOVA & NMDS
+library(cluster) # for cluster analysis
+
+```
+
+# Load data
+```{r}
+veg <- read.csv("data_master/nwt_sennet_veg.csv") %>% 
+    mutate(plot_name = as.factor(plot_name)) %>% 
+    mutate(abundance = as.numeric(abundance))
+
+phenodates50 <- read.csv("../nwt_sennet_phenocams/phenopix_output/all_years/nwt_sennet_phenocams_phenodates.csv")
+phenodates50 <- subset(phenodates, uncertainty_envelope == "50%")
+
+communities <- read.csv("../nwt_sennet_veg/Meta_WSN.csv") %>% 
+    select(-year)
+
+sennet_summary2 <- read.csv("data_master/sennet_summary.csv") %>% 
+    select(-year, -Greenup_z, -Maturity_z, -Senescence_z, -Dormancy_z, -length_of_season_z, -max_greenness_z)
+
+
+# Merge and transform data
+veg2 <- merge(veg, communities, by.x = c("sensor_node"), by.y = c("plot"))
+veg3 <- merge(veg2, phenodates50, by.x = c("sensor_node", "year"), by.y = c("phenocam", "year"), all.x = TRUE)
+veg4 <- merge(veg2, sennet_summary2, by.x = "sensor_node", by.y = "phenocam")
+```
+
+
+# Community types (NMDS & PERMANOVA)
+```{r}
+# Transform data to be readable by vegan package (create a dataframe with species as columns, plots as rows, and abundance of species as the values.)
+veg_spread <- veg3 %>% 
+    filter(multi.hit_or_top.hit == "top-hit") %>% 
+    select(-Note, -USDA_code, -category, -group, - growth_habit, -corrected_NWT_name) %>% 
+    spread(species, abundance)
+
+# Separate the data into a Veg df and a Meta df
+Veg <- veg_spread %>% 
+    select(ACHMIL:Willow_sp)
+
+Meta <- veg_spread %>% 
+    select(sensor_node:length_of_season) %>% 
+    mutate(SnowmeltDate = as.Date(paste0(SnowmeltDate, "-2017"), format = "%d-%b-%Y"),
+           melt_Julian = as.numeric(strftime(SnowmeltDate, format = "%j")))
+
+
+# Alternate Meta
+veg_spread2 <- veg4 %>% 
+    filter(multi.hit_or_top.hit == "top-hit") %>% 
+    select(-Note, -USDA_code, -category, -group, - growth_habit, -corrected_NWT_name) %>% 
+    spread(species, abundance)
+
+# Separate the data into a Veg df and a Meta df
+Veg2 <- veg_spread2 %>% 
+    select(ACHMIL:VIOADU)
+
+Meta2 <- veg_spread2 %>% 
+    select(sensor_node:LOS_2018) %>% 
+    mutate(SnowmeltDate = as.Date(paste0(SnowmeltDate, "-2017"), format = "%d-%b-%Y"),
+           melt_Julian = as.numeric(strftime(SnowmeltDate, format = "%j")))
+
+```
+
+```{r}
+# We need to replace all blank spaces (NA) with zeros in the Veg dataframe:
+Veg[is.na(Veg)] <- 0 
+Veg2[is.na(Veg2)] <- 0 
+
+# We relativize the data using the "decostand" function. This will change the values to represent the relative portion of the total.
+Veg.rel <- decostand(Veg,"total")
+Veg.rel2 <- decostand(Veg2,"total")
+
+# Define some explanatory terms for use later:
+Plot <- Meta$plot_name
+Community <- Meta$Comm_ClusterWard
+Snow <- Meta$SnowmeltDate
+Year <- Meta$year
+```
+
+## PERMANOVA
+```{r}
+# Control for specific plot
+## Need to use `adonis`, not `adonis2` because of the need to control for repeat sampling of plots (`strata` = plot)
+permanova_comm <- adonis(Veg.rel ~ Community,
+                         strata = Plot,
+                         data = Meta, 
+                         permutations = 999, 
+                         method = "bray", 
+                         na.action = na.omit)
+
+permanova_comm_year <- adonis(Veg.rel ~ Community*Year,
+                         strata = Plot,
+                         data = Meta, 
+                         permutations = 999, 
+                         method = "bray", 
+                         na.action = na.omit)
+
+permanova_comm2 <- adonis(Veg.rel2 ~ Comm_ClusterWard,
+                         # strata = sensor_node,
+                         data = Meta2, 
+                         permutations = 999, 
+                         method = "bray", 
+                         na.action = na.omit)
+```
+
+```{r}
+# Bray-Curtis dissimilarity
+Veg.rel.bray <- vegdist(Veg.rel, method="bray") 
+Veg.rel.bray2 <- vegdist(Veg.rel2, method="bray") 
+
+# PermDisp (function "betadisper") measures the dispersion of each "Community"
+Veg.disper <- betadisper(Veg.rel.bray, Community)
+Veg.disper
+
+#Ad-hoc tests
+library(car)
+anova(Veg.disper)
+permutest(Veg.disper)
+TukeyHSD(Veg.disper)
+```
+
+```{r}
+# Arguments: metaMDS(Relativized data, k= number of dimensions, `try` = number of runs to attempt minimal stress)
+Veg.nmds <- metaMDS(Veg.rel, k=2, try = 100)
+Veg.nmds$stress # 0.18
+stressplot(Veg.nmds, Veg.rel.bray)
+Veg.nmds
+
+Veg.nmds2 <- metaMDS(Veg.rel2, k=2, try = 100)
+Veg.nmds2$stress # 0.18
+stressplot(Veg.nmds2, Veg.rel.bray2)
+Veg.nmds2
+```
+
+```{r NMDS Ordiplot}
+plots <- paste(Meta$sensor_node)
+par(mfrow = c(1,1))
+ordiplot(Veg.nmds, type="n", main = "NMDS by Plant Community and \nSoil Moisture Minimum (2017)")
+# orditorp (Veg.nmds, display="species", col="grey30", air=0.01, cex = 0.3)
+orditorp (Veg.nmds, display="sites", label = plots, col="black", air=0.01, cex = 1)
+with (Meta, ordiellipse(Veg.nmds, Meta$Comm_ClusterWard, kind="se", conf=0.95, col="darkseagreen", lwd=2, label=TRUE))
+# with (Meta, ordiellipse(Veg.nmds, sensor_node, kind="se", conf=0.95, col="turquoise4", lwd=2, label=TRUE))
+with (Meta, ordisurf(Veg.nmds, Meta$MinSoilM_2017, add = TRUE, col = "thistle"))
+
+```
+
+```{r NMDS Ordiplot}
+par(mfrow = c(1,1))
+ordiplot(Veg.nmds2, type="n", main = "NMDS by Plant Community and \nSoil Moisture Minimum (2017)")
+orditorp (Veg.nmds2, display="species", col="grey30", air=0.01, cex = 0.3)
+with (Meta2, ordiellipse(Veg.nmds2, Meta2$Comm_ClusterWard, kind="se", conf=0.95, col="darkseagreen", lwd=2, label=TRUE))
+# with (Meta, ordiellipse(Veg.nmds, sensor_node, kind="se", conf=0.95, col="turquoise4", lwd=2, label=TRUE))
+with (Meta2, ordisurf(Veg.nmds, Meta2$sm30cm_gs_min, add = TRUE, col = "thistle"))
+
+```
+
+```{r}
+# Make centroids for each site/year/meltmonth combination
+Meta$plot.year <- paste0(Meta$sensor_node, "_", Meta$year)
+env <- as.data.frame(Meta$plot.year)
+ef <- envfit(varespec.nmds, env, permu=999)
+class(ef)
+ef
+vec.sp.df <- as.data.frame(ef$factors$centroids)
+# Export this centroid table, and add site, year, and meltmonth columns in excel.
+# write.csv(vec.sp.df, "output/Centroids.csv")
+
+# Plot Recovery and Treatment Centroids
+d <- read.csv("output/Centroids.csv") %>% 
+    mutate(plot.year = substr(X, start = 15, stop = 100000L)) %>% 
+    separate(plot.year, into = c("plot", "year"), sep = "_") %>% 
+    select(-X)
+d2 <- merge(d, Meta, by.x = c("plot", "year"), by.y = c("sensor_node", "year"))
+
+Meta2 <- read.csv("output/nwt_sennet_meta.csv")
+
+# Create figure with arrows showing directional change of each plot
+for(i in plot_list) {
+    temp <- subset(d2, plot == i)
+    assign(paste0("wsn", i), temp, envir = globalenv())
+}
+
+ggplot(d2, aes(NMDS1, NMDS2)) +
+    geom_point(aes(colour=plot),size = 5) +
+    geom_path(data = wsn6, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn7, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn8, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn9, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn10, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn11, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn12, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn13, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn14, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn15, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn16, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn17, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn19, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn20, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn21, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2)
+    theme(text = element_text(size=30))
+
+```
+
+# Cluster Analysis
+
+```{r}
+Veg.bc <- vegdist(Veg.rel, method="bray")
+Veg.cluster <- agnes(Veg.bc, 
+                     diss = TRUE, 
+                     method = "average", 
+                     keep.diss = TRUE)
+pltree(Veg.cluster, main = "pltree (UPGMA, average)", labels = Meta$sensor_node)
+```
+
+```{r Nearest neighbor method}
+# Nearest neighbor method
+Veg.cluster2 <- agnes(Veg.bc, diss=TRUE, method="single", keep.diss=TRUE)
+pltree(Veg.cluster2, main = "pltree (nearest neighbor)", labels = Meta$sensor_node)
+```
+
+```{r Furthest neighbor method}
+# Furthest neighbor method
+Veg.cluster3 <- agnes(Veg.bc, diss=TRUE, method="complete", keep.diss=TRUE)
+pltree(Veg.cluster3, main = "pltree (furthest neighbor)", labels = Meta$sensor_node)
+```
+
+The Ward method is also commonly used and is based on minimizing variance in dissimilarities between groups:
+```{r Ward method}
+Veg.cluster4 <- agnes(Veg.bc, diss=TRUE, method="ward", keep.diss=TRUE)
+pltree(Veg.cluster4, main = "pltree (ward)", labels = Meta$sensor_node)
+```
+
+All dissimilarity trees:
+```{r}
+par(mfrow = c(2,2))
+pltree(Veg.cluster, main = "pltree (UPGMA, average)", labels = Meta$sensor_node)
+pltree(Veg.cluster2, main = "pltree (nearest neighbor)", labels = Meta$sensor_node)
+pltree(Veg.cluster3, main = "pltree (furthest neighbor)", labels = Meta$sensor_node)
+pltree(Veg.cluster4, main = "pltree (ward)", labels = Meta$sensor_node)
+
+```
+
+```{r}
+library(ggdendro)
+ggdendrogram(Veg.cluster4)
+
+dhc <- as.dendrogram(Veg.cluster4)
+ddata <- dendro_data(dhc, type = "rectangle")
+p <- ggplot(segment(ddata)) + 
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) + 
+    coord_flip() + 
+    scale_y_reverse(expand = c(0.2, 0)) + 
+    geom_text(aes(x = x, y = y, label = label, angle = 0, hjust = 0), data= label(ddata))
+p
+```
+
+## Split into clusters
+
+It may not always be obvious where to cut the tree to determine groups. To understand the best number of groups for the amount of dissimilarity explained, we can cut the tree at different points and compare mean indicator values. Here, we’ll iterate the procedure to evaluate mean indicator values from data segregated into 2 to 15 groups:
+```{r}
+mean_indcls <- numeric(11)
+for (k_cuts in 2:11) {
+    cut_tree <- cutree(Veg.cluster4, k = k_cuts)
+    ind_species <- multipatt(Veg.rel, cut_tree, duleg=TRUE) # requires indicspecies package
+    mean_indcls[k_cuts] <- mean(ind_species$sign$stat, na.rm = TRUE)
+}
+plot(mean_indcls)
+mean_indcls
+```
+
+## Indicator species based on tree clustering
+
+```{r cutree}
+
+cut_tree <- cutree(Veg.cluster, k=5)
+ind_species <- multipatt(Veg.rel,cut_tree,duleg=TRUE)
+ind_species
+summary(ind_species)
+
+```
+
+We can also extract the estimated dissimilarity from a tree for all pairs of points, which is accomplished with the function ‘cophenetic’. In the following, we extract the tree distances from the first cluster analysis we performed (UPGMA method), then we plot these distances against the original Bray-Curtis dissimilarities and assess the correlation between the two matrices. A correlation of 1 would mean that we have a perfect tree.
+```{r}
+par(mfrow = c(2,2))
+
+# UPGMA method
+tree_dist <- cophenetic(Veg.cluster)
+plot(tree_dist, Veg.bc)
+cor(tree_dist, Veg.bc)
+
+# Nearest neighbor method
+tree_dist2 <- cophenetic(Veg.cluster2)
+plot(tree_dist2, Veg.bc)
+cor(tree_dist2, Veg.bc)
+
+# Furthest neighbor method
+tree_dist3 <- cophenetic(Veg.cluster3)
+plot(tree_dist3, Veg.bc)
+cor(tree_dist3, Veg.bc)
+
+# Ward method
+tree_dist4 <- cophenetic(Veg.cluster4)
+plot(tree_dist4, Veg.bc)
+cor(tree_dist4, Veg.bc)
+
+```
+
+
+******************
+# Cliff's code
+```{r}
+# NWT Snowbed Experiment Species Comp Analysis 2012-2018
+# Cliff Bueno de Mesquita
+# November 2018
+
+################################### Setup ##################################################
+library(permute)
+library(lattice)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+library(car)
+library(nlme)
+library(rcompanion)
+setwd("~/Desktop/Functions")
+source("Summary.R")
+setwd("~/Desktop/CU/7Niwot/Snowbed")
+
+# load data
+
+## meta
+meta <- read.csv("snowbed2012.2018_meta.csv")
+meta$position <- as.factor(meta$position)
+meta$year <- as.factor(meta$year) 
+meta <- meta[complete.cases(meta$date),] # Remove 2016 site D1 plot D3
+
+yr5.meta <- subset(meta, year == "2016") # To look at just 2016, have snowmelt data
+yr5.meta <- yr5.meta[complete.cases(yr5.meta$dsm1),] # Remove 3 plots where hobos failed
+
+## veg
+plants <- read.csv("snowbed2012.2018_CBanalysis.csv")
+plants <- plants[complete.cases(plants$bare),] # Remove 2016 site D1 plot D3
+yr5.plants <- subset(plants, year == "2016")
+yr5.plants <- yr5.plants[complete.cases(yr5.plants$dsm1),]
+plants <- plants[,9:173] # Remove metadata columns
+
+rich <- plants[,10:165] # Subset just vascular plants
+meta$richness <- specnumber(rich)
+yr5.plants <- yr5.plants[,9:173] # Remove metadata columns
+
+plants.rel <- decostand(plants,"total")
+yr5.plants.rel <- decostand(yr5.plants, "total")
+
+
+
+############################### Explore All Data ###########################################
+spe.tot <- apply(Veg, 2, sum)
+sort(spe.tot)
+plot(radfit(spe.tot)) # Lognormal
+varespec.bray <- vegdist(Veg.rel, method="bray")
+varespec.nmds <- metaMDS(varespec.bray, k=2, trymax = 100)
+varespec.nmds$stress #0.21
+stressplot(varespec.nmds, varespec.bray)
+ordiplot(varespec.nmds, type = "p", display = "sites")
+with(Meta, ordiellipse(varespec.nmds, site, kind="se", conf=0.95, col="blue", lwd=2, label=TRUE))
+ordiplot(varespec.nmds, type = "p", display = "sites")
+with(Meta, ordiellipse(varespec.nmds, year, kind="se", conf=0.95, col="blue", lwd=2, label=TRUE))
+ordiplot(varespec.nmds, type = "p", display = "sites")
+with(Meta, ordisurf(varespec.nmds, Maturity, kind="se", conf=0.95, col="blue", lwd=2, label=TRUE))
+orditorp (Veg.nmds, display="sites", col="grey30", air=0.01, cex = 0.3)
+m <- adonis(varespec.bray ~ Meta$plot_name*Meta$SnowmeltDate*Meta$year, permutations=999)
+m
+# Site, melt significant, year not
+# Try strata within site
+m <- adonis(varespec.bray ~ Meta$SnowmeltDate*Meta$year*Meta$multi.hit_or_top.hit, strata = Meta$plot_name, permutations=999)
+m # Same result (melt significant but year not)
+
+# Make centroids for each site/year/meltmonth combination
+Meta$plot.year <- paste0(Meta$sensor_node, "_", Meta$year)
+env <- as.data.frame(Meta$plot.year)
+ef <- envfit(varespec.nmds, env, permu=999)
+class(ef)
+ef
+vec.sp.df <- as.data.frame(ef$factors$centroids)
+# Export this centroid table, and add site, year, and meltmonth columns in excel.
+write.csv(vec.sp.df, "output/Centroids.csv")
+
+
+
+################################## Analysis ################################################
+# Within sites, how are things shifting over time? Is that a function of snowmelt timing?
+# Make facet wrap of sites showing how centroids within melt months move over time.
+
+# Plot Recovery and Treatment Centroids
+d <- read.csv("output/Centroids.csv") %>% 
+    mutate(plot.year = substr(X, start = 15, stop = 100000L)) %>% 
+    separate(plot.year, into = c("plot", "year"), sep = "_") %>% 
+    select(-X)
+d2 <- merge(d, Meta, by.x = c("plot", "year"), by.y = c("sensor_node", "year"))
+
+d2$year <- as.factor(d2$year)
+d2$plot <- as.factor(d2$plot)
+
+
+
+ar <- subset(d, site == "Arikaree")
+arAug <- subset(ar, melt == "Aug")
+arJul <- subset(ar, melt == "Jul")
+arJun <- subset(ar, melt == "Jun")
+arMay <- subset(ar, melt == "May")
+d1 <- subset(d, site == "D1")
+d1Jul <- subset(d1, melt == "Jul")
+d1Jun <- subset(d1, melt == "Jun")
+d1May <- subset(d1, melt == "May")
+ma <- subset(d, site == "Martinelli")
+maAug <- subset(ma, melt == "Aug")
+maJul <- subset(ma, melt == "Jul")
+maJun <- subset(ma, melt == "Jun")
+maMay <- subset(ma, melt == "May")
+so <- subset(d, site == "Soddie")
+soJul <- subset(so, melt == "Jul")
+soJun <- subset(so, melt == "Jun")
+soMay <- subset(so, melt == "May")
+
+
+# WSN veg data
+for(i in plot_list) {
+    temp <- subset(d2, plot == i)
+    assign(paste0("wsn", i), temp, envir = globalenv())
+}
+wsn6 <- subset(d2, plot == "6")
+wsn7 <- subset(d2, plot == "7")
+
+# arrows point from 2017 centroid to 2018 centroid
+ggplot(d2, aes(NMDS1, NMDS2)) +
+    geom_point(aes(colour=plot),size = 5) +
+    geom_path(data = wsn6, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn7, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn8, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn9, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn10, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn11, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn12, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn13, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn14, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn15, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn16, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn17, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn19, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn20, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    geom_path(data = wsn21, arrow = arrow(angle = 35, length = unit(0.5,"cm")), size = 2) + 
+    theme(text = element_text(size=30))
+    theme(legend.position = c(0.9, 0.12),
+          legend.title = element_text(size = 10),
+          legend.key.size = unit(0.2,"cm"),
+          axis.title.x = element_text(face="bold", size = 18),
+          axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+          axis.text.y = element_text(size = 16),
+          axis.title.y = element_text(face="bold",size=18))
+
+
+############################## Richness and Cover ##########################################
+# Repeated Measures Mixed Effects Model
+# melt x year fixed, site random
+Meta$year <- as.numeric(Meta$year)
+
+# Cover (sum of all vascular plant species)
+Veg_vasc <- Veg %>% 
+    select(-Lichen, -Litter, -Rock, -Soil)
+
+Meta$cover <- rowSums(Veg_vasc)
+
+model1 <- lme(cover ~ melt_Julian + year, 
+             random = ~1|sensor_node, 
+             correlation = corAR1(form = ~ year | sensor_node), 
+             data = Meta, 
+             method = "REML")
+Anova(model) # Significant melt and year
+x = residuals(model)
+library(rcompanion)
+plotNormalHistogram(x)
+plot(fitted(model),residuals(model))
+# Test random effect (site)
+model1 <- gls(cover ~ melt + year + melt:year, correlation = corAR1(form = ~ year | subject), data = Meta, method = "REML")
+anova(model, model1) # Site significant
+
+sum <- summarySE(Meta, measurevar = "cover", groupvars = c("melt", "year", "site"))
+pd <- position_dodge(0.2)
+sum$year <- as.factor(sum$year)
+ggplot(sum, aes(year, cover, colour = melt, group = melt)) +
+  scale_colour_discrete(name = "2016 Melt Month") +
+  scale_x_discrete(labels = c("2012","2013","2014","2015","2016","2017","2018")) +
+  geom_line(position = pd) +
+  geom_point(position = pd, size = 3) +
+  geom_errorbar(aes(ymin=cover-se, ymax=cover+se, colour=melt), width=0.1, position=pd) +
+  xlab("Year") +
+  ylab("% Vascular Plant Cover") +
+  facet_wrap(~site) +
+  theme(legend.position = c(0.9, 0.12),
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.2,"cm"),
+        axis.title.x = element_text(face="bold", size = 18),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 16),
+        axis.title.y = element_text(face="bold",size=18))
+
+# Richness
+model <- lme(richness ~ melt + year + melt:year, random = ~1|site, correlation = corAR1(form = ~ year | site/subject), data = Meta, method = "REML")
+Anova(model) # Significant melt and year
+x = residuals(model)
+plotNormalHistogram(x)
+plot(fitted(model),residuals(model))
+# Test random effect (site)
+model1 <- gls(richness ~ melt + year + melt:year, correlation = corAR1(form = ~ year | subject), data = Meta, method = "REML")
+anova(model, model1) # Site significant
+
+library(Rmisc)
+sum <- summarySE(Meta, measurevar = "richness", groupvars = c("melt_Julian", "year", "sensor_node"))
+pd <- position_dodge(0.2)
+sum$year <- as.factor(sum$year)
+ggplot(sum, aes(year, richness, colour = melt, group = melt)) +
+  scale_colour_discrete(name = "2016 Melt Month") +
+  scale_x_discrete(labels = c("2012","2013","2014","2015","2016","2017","2018")) +
+  geom_line(position = pd) +
+  geom_point(position = pd, size = 3) +
+  geom_errorbar(aes(ymin=richness-se,ymax=richness+se,colour=melt),width=.1,position=pd) +
+  xlab("Year") +
+  ylab("Vascular Plant Species Richness") +
+  facet_wrap(~site) +
+  theme(legend.position = c(0.1, 0.88),
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.2,"cm"),
+        axis.title.x = element_text(face="bold", size = 18),
+        axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 16),
+        axis.title.y = element_text(face="bold",size=18))
+
+
+
+################################## 2016 Snowmelt ###########################################
+# Make nmds with snowmelt day as continuous variable to show as vector on graph
+varespec.bray <- vegdist(yr5.Veg.rel, method="bray")
+varespec.nmds <- metaMDS(varespec.bray, k=2, trymax = 100)
+varespec.nmds$stress #0.20
+stressplot(varespec.nmds, varespec.bray)
+yr5.meta$NMDSaxis01<-varespec.nmds$points[,1]
+yr5.meta$NMDSaxis02<-varespec.nmds$points[,2]
+env <- yr5.meta[,9]
+ef <- envfit(varespec.nmds, env, permu=999, na.rm = TRUE)
+ef # Significant
+vec.sp.df <- as.data.frame(ef$vectors$arrows*sqrt(ef$vectors$r))
+vec.sp.df$variables <- "Melt Date"
+ggplot(yr5.meta, aes(NMDSaxis01, NMDSaxis02)) +
+  geom_point(aes(colour=site), size = 4) +
+  scale_colour_discrete(name = "Site") +
+  geom_segment(data=vec.sp.df,aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
+               arrow = arrow(length = unit(0.5, "cm")),colour="blue",
+               inherit.aes = FALSE) + 
+  geom_text(data=vec.sp.df,aes(x=NMDS1,y=NMDS2,label=variables),size=5) +
+  xlab("NMDS Axis 1") +
+  ylab("NMDS Axis 2") +
+  theme(legend.position = c(0.91, 0.8))
+
+
+```
+
+

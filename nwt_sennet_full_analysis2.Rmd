@@ -1,0 +1,2813 @@
+---
+title: "Full Analysis"
+author: "Kelsey Elwood"
+date: 20 March 2019
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, cache = FALSE)
+```
+
+The following script captures all the core analyses that I used in my masters paper (April 2019). The script is organized by research question. 
+
+The key questions that I ask are: 
+
+- Q1: What drives phenology across the landscape?
+
+- Q2: How do phenology and phenological responsiveness differ across the landscape? 
+
+- Q3: Does species composition affect phenology?
+
+# Setup
+
+```{r load-libraries, echo = TRUE}
+library(ggplot2) # for plotting
+library(dplyr) # for data manipulation (esp. pipes)
+library(tidyr) # for data manipulation (esp. spread/gather)
+library(lubridate) # for extraction of dates
+library(moments) # for calculating skewness of the data (function: `skewness()`)
+library(gridExtra) # for merging multiple figures into one
+library(grid) # for textGrob function
+library(nlme) # for lme models
+library(knitr) # for kable
+library(car) # for Anova
+library(rcompanion) # for lme interpretation
+library(vegan) # fon NMDS
+library(cluster) # for cluster analysis
+library(indicspecies)
+library(plotrix)
+
+```
+
+# Timestamp
+```{r timestamp}
+paste0("Timestamp:", Sys.time())
+```
+
+```{r load-data}
+# Vegetation data
+veg <- read.csv("data_master/nwt_sennet_veg.csv") %>% 
+    mutate(plot_name = as.factor(plot_name)) %>% 
+    filter(plot_name != "18") %>% 
+    mutate(abundance = as.numeric(abundance))
+veg2 <- veg %>% 
+    filter(!species %in% c("Litter", "Bare", "Moss", "Rock", "Soil", "Lichen")) %>% 
+    group_by(sensor_node, year, multi.hit_or_top.hit) %>% 
+    summarise(cover = sum(abundance, na.rm = TRUE),
+              richness = length(unique(species)))
+veg <- merge(veg, veg2, by = c("sensor_node", "year", "multi.hit_or_top.hit"))
+
+# Greenness data (filtered)
+greenness_2017 <- read.csv("data_master/all_phenocams_filtered_2017.csv") %>% 
+    mutate(date = as.POSIXct(date)) %>% 
+    filter(phenocam != "18")
+greenness_2018 <- read.csv("data_master/all_phenocams_filtered_2018.csv") %>% 
+    mutate(date = as.POSIXct(date))
+greenness_long <- rbind(greenness_2017, greenness_2018)
+# greenness_long2 <- greenness_long %>% 
+#     filter(brt <=400)
+
+greenness_doy <- greenness_long %>% 
+    select(phenocam, doy, year, max.filtered) %>% 
+    spread(key = year, value = max.filtered) %>% 
+    rename(max.filtered_2017 = "2017",
+           max.filtered_2018 = "2018") %>% 
+    mutate(date_2017 = as.Date(doy, origin = "2016-12-31"),
+           date_2018 = as.Date(doy, origin = "2017-12-31"))
+
+# sensor data (# used to be called sensor_summary)
+sensor_daily <- read.csv("data_master/sensor_summaries_3day90th.csv") %>% 
+    mutate(DATE = as.POSIXct(DATE, format = "%Y-%m-%d"),
+           YEAR = year(DATE),
+           doy = strftime(DATE, format = "%j"))
+
+# sensor monthly
+sensor_monthly <- sensor_daily %>% 
+    mutate(MONTH = month(DATE)) %>% 
+    group_by(phenocam, YEAR, MONTH) %>% 
+    summarize(sm5cm_min = min(sm5cm_3day10th, na.rm = TRUE),
+              sm5cm_mean = mean(sm5cm_daily_mean, na.rm = TRUE),
+              sm5cm_max = max(sm5cm_3day90th, na.rm = TRUE),
+              stemp5_min = min(stemp5_daily_mean, na.rm = TRUE),
+              stemp5_mean = mean(stemp5_daily_mean, na.rm = TRUE),
+              stemp5_max = max(stemp5_3day90th, na.rm = TRUE),
+              airtemp_min = min(airtemp_daily_min, na.rm = TRUE),
+              airtemp_mean = mean(airtemp_daily_mean, na.rm = TRUE),
+              airtemp_max = max(airtemp_daily_mean, na.rm = TRUE))
+
+sensor_yearly <- sensor_daily %>% 
+    mutate(MONTH = month(DATE)) %>% 
+    group_by(phenocam, YEAR) %>% 
+    summarize(sm5cm_min = min(sm5cm_3day10th, na.rm = TRUE),
+              sm5cm_mean = mean(sm5cm_daily_mean, na.rm = TRUE),
+              sm5cm_max = max(sm5cm_3day90th, na.rm = TRUE),
+              stemp5_min = min(stemp5_daily_mean, na.rm = TRUE),
+              stemp5_mean = mean(stemp5_daily_mean, na.rm = TRUE),
+              stemp5_max = max(stemp5_3day90th, na.rm = TRUE),
+              airtemp_min = min(airtemp_daily_min, na.rm = TRUE),
+              airtemp_mean = mean(airtemp_daily_mean, na.rm = TRUE),
+              airtemp_max = max(airtemp_daily_mean, na.rm = TRUE))
+
+sensor_yearly_2017 <- sensor_yearly %>% 
+    filter(YEAR == 2017)
+colnames(sensor_yearly_2017) <- paste(colnames(sensor_yearly_2017), sep = "_", "2017")
+
+sensor_yearly_2018 <- sensor_yearly %>% 
+    filter(YEAR == 2018)
+colnames(sensor_yearly_2018) <- paste(colnames(sensor_yearly_2018), sep = "_", "2018")
+
+sensor_yearly_spread <- merge(sensor_yearly_2017, sensor_yearly_2018, by.x = "phenocam_2017", by.y = "phenocam_2018") %>% 
+    rename(phenocam = phenocam_2017) %>% 
+    select(-YEAR_2017)
+
+# merge sensor and greenness data
+sennet_data <- merge(greenness_long, sensor_daily, by.x = c("date", "phenocam", "doy"), by.y = c("DATE", "phenocam", "doy"))
+
+# greenness summary
+greenness_summary <- greenness_long %>% 
+    group_by(year, phenocam) %>% 
+    summarise(mean_greenness = mean(max.filtered),
+              median_greenness = median(max.filtered),
+              max_greenness = max(max.filtered),
+              min_greenness = min(max.filtered),
+              max90_greenness = quantile(max.filtered, 0.9),
+              min90_greenness = quantile(max.filtered, 0.1))
+
+greenness_summary_dates <- greenness_long %>% 
+    group_by(year, phenocam) %>% 
+    top_n(1, max.filtered) %>% 
+    top_n(1, doy) %>% 
+    select(phenocam, year, max.filtered, date, doy) %>% 
+    rename(peak_green = max.filtered,
+           peak_green_date = date,
+           peak_green_doy = doy)
+
+# phenodates
+# phenodates <- read.csv("../nwt_sennet_phenocams/phenopix_output/all_years/nwt_sennet_phenocams_phenodates.csv")
+# phenodates <- subset(phenodates, uncertainty_envelope == "50%")
+
+phenodates <- read.csv("../nwt_sennet_phenocams/phenopix_output/phenophase_prop.csv") %>% 
+    mutate(los = eos_10 - sos_min,
+           los_sen = eos_75 - sos_min)
+
+# The following function is used to spread the uncertainty across multiple variables. I copied this code from https://community.rstudio.com/t/spread-with-multiple-value-columns/5378
+myspread <- function(df, key, value) {
+    # quote key
+    keyq <- rlang::enquo(key)
+    # break value vector into quotes
+    valueq <- rlang::enquo(value)
+    s <- rlang::quos(!!valueq)
+    df %>% gather(variable, value, !!!s) %>%
+        unite(temp, !!keyq, variable) %>%
+        spread(temp, value)
+}
+
+# phenodates_spread <- phenodates %>% 
+#     myspread(uncertainty_envelope, c(sos_min, peak, eos_75, eos_10)) %>% 
+#     rename(sos_min = "50%_sos_min",
+#            peak = "50%_peak",
+#            eos_75 = "50%_eos_75",
+#            eos_min = "50%_eos_min",
+#            sos_min_10 = "10%_sos_min",
+#            peak_10 = "10%_peak",
+#            eos_75_10 = "10%_eos_75",
+#            eos_min_10 = "10%_eos_min",
+#            sos_min_90 = "90%_sos_min",
+#            peak_90 = "90%_peak",
+#            eos_75_90 = "90%_eos_75",
+#            eos_min_90 = "90%_eos_min") %>% 
+#     mutate(sos_min_range = sos_min_90 - sos_min_10,
+#            peak_range = peak_90 - peak_10,
+#            eos_75_range = eos_75_90 - eos_75_10,
+#            eos_min_range = eos_min_90 - eos_min_10)
+# 
+phenodates2018 <- phenodates %>%
+    filter(year == 2018) %>%
+    mutate(sos_min_2018 = sos_min,
+           peak_2018 = peak,
+           eos_75_2018 = eos_75,
+           eos_10_2018 = eos_10,
+           LOS_2018 = los,
+           LOS2_2018 = los_sen)
+phenodates2017 <- phenodates %>%
+    filter(year == 2017,
+           phenocam != "18") %>%
+    mutate(sos_min_2017 = sos_min,
+           peak_2017 = peak,
+           eos_75_2017 = eos_75,
+           eos_10_2017 = eos_10,
+           LOS_2017 = los,
+           LOS2_2017 = los_sen)
+
+phenodates2 <- merge(phenodates2017[ , c("phenocam", "sos_min_2017", "peak_2017","eos_75_2017",  "eos_10_2017", "LOS_2017", "LOS2_2017")],
+                     phenodates2018[, c("phenocam", "sos_min_2018", "peak_2018", "eos_75_2018", "eos_10_2018", "LOS_2018", "LOS2_2018")], by = "phenocam")
+# 
+
+# community
+communities <- read.csv("../nwt_sennet_veg/Meta_WSN.csv") %>% 
+    select(-year) %>% 
+    mutate(SnowmeltDate_2017 = as.POSIXct(SnowmeltDate_2017, format = "%m/%d/%y"),
+           SnowmeltDate_2018 = as.Date(SnowmeltDate_2018, format = "%m/%d/%y")) %>% 
+    mutate(SnowmeltDOY_2017 = as.numeric(strftime(SnowmeltDate_2017, "%j")),
+           SnowmeltDOY_2018 = as.numeric(strftime(SnowmeltDate_2018, "%j")))  %>% 
+    filter(plot != "18")
+communities$comms_ordered <- factor(communities$Comm_ClusterWard, 
+                                    levels = c("SA", "WM", "MM", "DM3", "DM2", "DM1"))
+
+Comm_DM1 <- communities %>% 
+    filter(Comm_ClusterWard == "DM1") %>% 
+    select(plot) %>% 
+    sapply(as.character) %>% 
+    as.vector()
+Comm_DM2 <- communities %>% 
+    filter(Comm_ClusterWard == "DM2") %>% 
+    select(plot) %>% 
+    sapply(as.character) %>% 
+    as.vector()
+Comm_DM3 <- communities %>% 
+    filter(Comm_ClusterWard == "DM3") %>% 
+    select(plot) %>% 
+    sapply(as.character) %>% 
+    as.vector()
+Comm_MM <- communities %>% 
+    filter(Comm_ClusterWard == "MM") %>% 
+    select(plot) %>% 
+    sapply(as.character) %>% 
+    as.vector()
+Comm_WM <- communities %>% 
+    filter(Comm_ClusterWard == "WM") %>% 
+    select(plot) %>% 
+    sapply(as.character) %>% 
+    as.vector()
+Comm_SA <- communities %>% 
+    filter(Comm_ClusterWard == "SA") %>% 
+    select(plot) %>% 
+    sapply(as.character) %>% 
+    as.vector()
+
+# Merge sennet meta (previously called sennet_vegplot_meta)
+veg_meta <- merge(phenodates2, communities, by.x = "phenocam", by.y = "plot")
+veg_meta <- merge(veg_meta, sensor_yearly_spread, by = "phenocam", all.x = TRUE)
+
+# Plot list (for loops and functions)
+plot_list <- c("6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "19", "20", "21") 
+
+# Color lists
+plot_cols_comm <- c("paleturquoise1", # plot 6 = MM
+                    "paleturquoise2", # plot 7 = MM
+                    "paleturquoise3", # plot 8 = MM
+                    "lightgoldenrod1", # plot 9 = DM1
+                    "lightgoldenrod2", # plot 10 = DM1
+                    "navajowhite1", # plot 11 = DM3
+                    "paleturquoise4", # plot 12 = MM
+                    "dodgerblue", # plot 13 = WM
+                    "lightgoldenrod3", # plot 14 = DM1
+                    "navajowhite2", # plot 15 = DM3
+                    "lemonchiffon1", # plot 16 = DM2
+                    "dodgerblue3", # plot 17 = WM
+                    "olivedrab3", # plot 19 = SA
+                    "lemonchiffon2", # plot 20 = DM2
+                    "lemonchiffon3")  # plot 21 = DM2
+
+# comm_cols <- c("goldenrod2", "goldenrod", "goldenrod3", "skyblue2", "dodgerblue4", "olivedrab")
+comm_cols <- c("olivedrab", "dodgerblue4", "skyblue2", "goldenrod2", "goldenrod", "goldenrod3")
+
+# Vectors for phenophases
+phenos <- c("Start of season", "Peak greenness", "Senescence", "Dormancy")
+pheno_ordered <- factor(phenos,
+                        levels = c("Start of season", "Peak greenness", "Senescence", "Dormancy"))
+# pheno_cols <- c("#a6d96a", "#1a9641", "#fdae61", "#d7191c")
+pheno_cols <- c("tan4", "darkgreen", "sandybrown", "darkolivegreen3")
+
+comm_order <- c("9", "10", "14", 
+                "16", "20", "21",
+                "11", "15",
+                "19",
+                "6", "7", "8", "12",
+                "13", "17")
+
+calcSE <- function(x) {sd(x)/sqrt(length(x))}
+
+```
+
+# Q1: What drives phenology across the landscape?
+The purpose of this question is to look at overall patterns of phenology. Some sub-questions that I look at are:
+- What was the difference in phenology between 2017 and 2018?
+- Did length of season differ between 2017 and 2018?
+- Are there common environmental drivers that influenced phenodates?
+
+## i. Overall patterns of phenology
+
+Explore the greenness data to check for assumptions of normalcy. The data is effectively normal.
+
+```{r greenness_histogram}
+p_greenness_hist <- ggplot() + 
+    geom_histogram(aes(max.filtered), data = greenness_long,
+                   binwidth = 0.02) + 
+    facet_wrap(~ year) + 
+    theme_bw()
+
+p_greenness_hist   
+
+```
+
+```{r greenness-skewness}
+# Skewness 2017
+skewness(greenness_2017$max.filtered) # values closest to 0 are best
+shapiro.test(greenness_2017$max.filtered) # values of W closest to 1 are best
+
+# Skewness 2018
+skewness(greenness_2018$max.filtered) # values closest to 0 are best
+shapiro.test(greenness_2018$max.filtered) # values of W closest to 1 are best
+```
+
+### 1. What is the difference in phenology between 2017 and 2018?
+
+Mean greenness across all plots:
+```{r greenness_timeseries_yearlymean, warning=FALSE, message=FALSE}
+greenness_mean <- greenness_long %>% 
+    group_by(doy, year) %>% 
+    summarise(mean_greenness = mean(max.filtered))
+
+p_greenness_mean <- ggplot() + 
+    ylim(0.3, 0.51) + 
+    geom_smooth(data = greenness_mean,
+              aes(x = as.Date(doy, origin = "2017-12-31"),
+                  y = mean_greenness,
+                  linetype = as.factor(year)),
+              alpha = 1, size = 1, color = "black") +
+    scale_linetype_manual(name = "Year",
+                            breaks = c("2017", "2018"),
+                            values = c(1,2)) + 
+    labs(title = "Greenness in 2017 & 2018",
+         x = "Date", 
+         y = "Mean Greenness (GCC)") +
+    theme_bw() + 
+    theme(text = element_text(size=20),
+          axis.text.x = element_text(angle=45, hjust=0.5))
+p_greenness_mean
+```
+
+Greenness of each plot, faceted by year:
+```{r greenness-faceted-by-year}
+p_greenness_all <- ggplot(data = greenness_long) + 
+    geom_line(aes(x = as.Date(doy, origin = "2017-12-31"),
+                  y = max.filtered, 
+                  group = as.factor(phenocam),
+                  color = as.factor(phenocam),
+                  linetype = as.factor(year)), 
+              alpha = 0.5, size = 2) +  
+    ylim(0.3, 0.5) + 
+    # scale_color_hue(name = "Phenocam") +
+    scale_color_manual(name = "Phenocam", values = plot_cols_comm, breaks = plot_list) + 
+    scale_linetype(name = "Year") + 
+    facet_wrap(~ year, nrow = 2) + 
+    labs(title = "Greenness in 2017 & 2018",
+         x = "Date", 
+         y = "Greenness (GCC)") +
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=45, hjust=0.5))
+p_greenness_all
+```
+
+Greenness of each plot, faceted by plot:
+```{r greenness-faceted-by-plot-and-year, fig.width=24, fig.height=8}
+snow_on_doys_2018 <- c(279:356) # For 2018
+snow_on_doys_2017 <- c(259, 267:272, 274:278, 280, 282:286, 294:295, 300:301, 305, 308:356) # For 2017 data
+snow_on_doys_2017_14 <- c(259:356, 169:184) # For WSN 14 in 2017 (GCC is artifically higher for an early FOVs)
+
+greenness_long_pheno <- merge(greenness_long, phenodates,
+                             by = c("phenocam", "year")) 
+greenness_long_2017 <- greenness_long %>% 
+    filter(year == 2017, 
+           !doy %in% snow_on_doys_2017, 
+           phenocam != "14")
+greenness_long_2018 <- greenness_long %>% 
+    filter(year == 2018, 
+           !doy %in% snow_on_doys_2018)
+greenness_long_2017_14 <- greenness_long %>% 
+    filter(year == 2017, 
+           phenocam == "14",
+           !doy %in% snow_on_doys_2017_14)
+
+greenness_long2 <- rbind(greenness_long_2017, 
+                         greenness_long_2017_14, 
+                         greenness_long_2018)
+greenness_long_pheno <- merge(greenness_long2, phenodates,
+                             by = c("phenocam", "year"))
+greenness_long_pheno_comm <- merge(greenness_long_pheno, communities[1:2],
+                             by.x = c("phenocam"), by.y = "plot")
+
+min_doy <- min(phenodates$sos_min) - 7
+max_dorm_doy <- max(phenodates$eos_10) + 7
+
+p_greenness_plots <- ggplot(data = greenness_long_pheno_comm) + 
+    scale_y_continuous(breaks = c(0.35, 0.45), limits = c(0.3, 0.5)) + 
+    facet_grid(year ~ factor(phenocam, levels = comm_order)) + 
+    geom_line(aes(x = as.Date(doy, origin = "2017-12-31"),
+                  y = max.filtered, 
+                  group = as.factor(phenocam)), 
+              alpha = 1, size = 2) + 
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(sos_min, origin = "2017-12-31"), 
+                   color = "Start of Season")) +    
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(peak, origin = "2017-12-31"), 
+                   colour = "Peak Greenness")) +
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(eos_75, origin = "2017-12-31"), 
+                   colour = "Start of Senescence")) +
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(eos_10, origin = "2017-12-31"), 
+                   colour = "End of Season")) +
+    scale_color_manual(breaks = pheno_ordered,
+                       # values = pheno_cols,
+                       values = c("tan4", "darkgreen", "darkolivegreen3", "sandybrown"),
+                       name = "Phenophase") +
+    scale_x_date(date_breaks = "6 weeks",
+                 date_labels = "%b-%d",
+                 limits = c(as.Date(min_doy, origin = "2017-12-31"),
+                            as.Date(max_dorm_doy, origin = "2017-12-31"))) + 
+    # scale_linetype(name = "Year") + 
+    labs(title = "Greenness in 2017 & 2018",
+         x = "Date",
+         y = "Greenness (GCC)") +
+    theme_bw() + 
+    theme(text = element_text(size=30), 
+        axis.text.x = element_text(angle=90, hjust = 0.5))
+p_greenness_plots
+
+```
+
+```{r separated-by-year, fig.width=24, fig.height=12}
+p_greenness_plots_2017 <- ggplot(data = greenness_long_pheno_comm[greenness_long_pheno_comm$year == 2017,]) + 
+    ylim(0.3, 0.5) + 
+    geom_line(aes(x = as.Date(doy, origin = "2017-12-31"),
+                  y = max.filtered, 
+                  group = as.factor(phenocam)), 
+              alpha = 1, size = 2) + 
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(sos_min, origin = "2017-12-31"), 
+                   color = "Start of season")) +    
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(peak, origin = "2017-12-31"), 
+                   colour = "Peak greenness")) +
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(eos_75, origin = "2017-12-31"), 
+                   colour = "Senescence")) +
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(eos_10, origin = "2017-12-31"), 
+                   colour = "Dormancy")) +
+    scale_color_manual(breaks=c("Start of Season","Peak Greenness","Start of Senescence", "End of Season"),
+                       values = pheno_cols,
+                       name = "Phenophase") +
+    scale_x_date(date_breaks = "1 month",
+                 date_labels = "%b",
+                 limits = c(as.Date(min_doy, origin = "2017-12-31"),
+                            as.Date(max_dorm_doy, origin = "2017-12-31"))) + 
+    # scale_linetype(name = "Year") + 
+    facet_wrap(. ~ factor(phenocam, levels = comm_order), ncol = 3) + 
+    labs(title = "Greenness in 2017 & 2018",
+         y = "Greenness (GCC)") +
+    theme_bw() + 
+    theme(text = element_text(size=20), 
+        axis.text.x = element_text(angle=45, hjust = 0.5))
+
+p_greenness_plots_2018 <- ggplot(data = greenness_long_pheno_comm[greenness_long_pheno_comm$year == 2018,]) + 
+    ylim(0.3, 0.5) + 
+    geom_line(aes(x = as.Date(doy, origin = "2017-12-31"),
+                  y = max.filtered, 
+                  group = as.factor(phenocam)), 
+              alpha = 1, size = 2) + 
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(sos_min, origin = "2017-12-31"), 
+                   color = "Start of season")) +    
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(peak, origin = "2017-12-31"), 
+                   colour = "Peak greenness")) +
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(eos_75, origin = "2017-12-31"), 
+                   colour = "Senescence")) +
+    geom_vline(linetype = 1, size = 1.5,
+               aes(xintercept = as.Date(eos_10, origin = "2017-12-31"), 
+                   colour = "Dormancy")) +
+    scale_color_manual(breaks= pheno_ordered,
+                       values = pheno_cols,
+                       name = "Phenophase") +
+    scale_x_date(date_breaks = "1 month",
+                 date_labels = "%b",
+                 limits = c(as.Date(min_doy, origin = "2017-12-31"),
+                            as.Date(max_dorm_doy, origin = "2017-12-31"))) + 
+    # scale_linetype(name = "Year") + 
+    facet_wrap(. ~ factor(phenocam, levels = comm_order), ncol = 3) + 
+    labs(title = "Greenness in 2017 & 2018",
+         y = "Greenness (GCC)") +
+    theme_bw() + 
+    theme(text = element_text(size=20), 
+        axis.text.x = element_text(angle=45, hjust = 0.5))
+          
+grid.arrange(p_greenness_plots_2017, p_greenness_plots_2018, nrow = 1)
+# , p_greenness_plots_dm3, 
+#              p_greenness_plots_mm, p_greenness_plots_wm, p_greenness_plots_sa, 
+#              nrow=2)
+```
+
+2018 had earlier phenology than 2017
+
+#### a. Difference between years shows interannual variability in phenology
+
+```{r greenness_timeseries_faceted, fig.width=16, fig.height=12}
+greenness2 <- merge(greenness_doy, 
+                    phenodates2, 
+                    by = "phenocam", all.x = TRUE)
+greenness3 <- merge(greenness2, communities[1:2], 
+                    by.x = "phenocam", by.y = "plot") %>% 
+    mutate(gu_change = sos_min_2018 - sos_min_2017,
+           sen_change = eos_75_2018 - eos_75_2017,
+           mat_change = peak_2018 - peak_2017,
+           dorm_change = eos_10_2018 - eos_10_2017) %>% 
+    mutate(gu2017_earlier = ifelse(gu_change >=0, gu_change, NA),
+           sen2017_earlier = ifelse(sen_change >=0, sen_change, NA),
+           mat2017_earlier = ifelse(mat_change >=0, mat_change, NA),
+           dorm2017_earlier = ifelse(dorm_change >=0, dorm_change, NA))
+
+
+# Maybe this code will help remove the extra rows so that I can get transparency for the rectangles. It is worth trying this (just don't have time right now).
+# df %>%
+#   group_by(id) %>%
+#   arrange(stopSequence) %>%
+#   filter(row_number()==1 | row_number()==n())
+
+p_phenodates <- ggplot(data = greenness3, 
+                       aes(x = as.Date(doy, origin = "2017-12-31"))) + 
+    facet_wrap(. ~ factor(phenocam, levels = comm_order), ncol = 3) +
+    # facet_grid(phenocam ~ Comm_ClusterWard) + 
+    # To get transparency, we have to manually insert the start and end dates for each facet and each phenophase. This is because the rectangles are effectively created for each row of the data, so the transparency gets "cancelled out" by all those rectangles overlapping. It's annoying, but the only way to do it, based on what I've found online (as of 5 March 2018)
+    ## which(grepl(i, greenness2$phenocam))[1]
+    geom_rect(aes(xmin = as.Date(sos_min_2018, origin = "2017-12-31"),
+                  xmax = as.Date(sos_min_2017, origin = "2017-12-31"),
+                  fill = "Start of season", ymin = 0.3, ymax = 0.5), alpha = 0.5) +
+    geom_rect(aes(xmin = as.Date(peak_2018, origin = "2017-12-31"), 
+                  xmax = as.Date(peak_2017, origin = "2017-12-31"), 
+                  fill = "Peak greenness", ymin = 0.3, ymax = 0.5), alpha = 0.5) +
+    geom_rect(aes(xmin = as.Date(eos_75_2018, origin = "2017-12-31"), 
+                  xmax = as.Date(eos_75_2017, origin = "2017-12-31"), 
+                  fill = "Senescence", ymin = 0.3, ymax = 0.5), alpha = 0.5) +  
+    geom_rect(aes(xmin = as.Date(eos_10_2018, origin = "2017-12-31"), 
+                  xmax = as.Date(eos_10_2017, origin = "2017-12-31"), 
+                  fill = "Dormancy", ymin = 0.3, ymax = 0.5), alpha = 0.5) +   
+    geom_line(aes(y = max.filtered_2017, color = "2017"), 
+              alpha = 1, size = 2) +
+    geom_line(aes(y = max.filtered_2018, color = "2018"), 
+              alpha = 0.7, size = 2) +
+    # scale_linetype_manual(breaks = c("2017", "2018"),
+    #                       values = c(1,6),
+    #                       name = "Year") +
+    #  The segments put arrows going 2017 to 2018 in the three instances when phenodates were LATER in 2018. I think it might actually be best to put in astrisks.
+    # geom_segment(aes(y = 0.45, yend = 0.45, 
+    #                  x = as.Date(sos_min_2017, origin = "2017-12-31"), 
+    #                  xend = as.Date(sos_min_2017 + gu2017_earlier, origin = "2017-12-31")),
+    #              na.rm = TRUE,
+    #              color = "black", size = 1, 
+    #              arrow = arrow(length = unit(0.125, "cm"))) +
+    # geom_segment(aes(y = 0.45, yend = 0.45, 
+    #                  x = as.Date(eos_75_2017, origin = "2017-12-31"), 
+    #                  xend = as.Date(eos_75_2017 + sen2017_earlier, origin = "2017-12-31")),
+    #              na.rm = TRUE,
+    #              color = "black", size = 1, 
+    #              arrow = arrow(length = unit(0.05, "cm"))) +
+    # geom_segment(aes(y = 0.45, yend = 0.45, 
+    #                  x = as.Date(peak_2017, origin = "2017-12-31"), 
+    #                  xend = as.Date(peak_2017 + mat2017_earlier, origin = "2017-12-31")),
+    #              na.rm = TRUE,
+    #              color = "black", size = 1, 
+    #              arrow = arrow(length = unit(0.125, "cm"))) +
+    # geom_vline(aes(xintercept = as.Date(sos_min_2017, origin = "2017-12-31"), color = "Start of season"), alpha = 0.5) +
+    # geom_vline(aes(xintercept = as.Date(peak_2017, origin = "2017-12-31"), colour = "Peak greenness"), alpha = 0.9) +
+    # geom_vline(aes(xintercept = as.Date(eos_75_2017, origin = "2017-12-31"), colour = "Senescence"), alpha = 0.5) +
+    # geom_vline(aes(xintercept = as.Date(eos_10_2017, origin = "2017-12-31"), colour = "Dormancy"),, alpha = 0.5) +
+    # geom_vline(aes(xintercept = as.Date(sos_min_2018, origin = "2017-12-31"), color = "Start of season"), alpha = 1, linetype = 2) +
+    # geom_vline(aes(xintercept = as.Date(peak_2018, origin = "2017-12-31"), colour = "Peak greenness"), alpha = 1, linetype = 2) +
+    # geom_vline(aes(xintercept = as.Date(eos_75_2018, origin = "2017-12-31"), colour = "Senescence"), alpha = 1, linetype = 2) +
+    # geom_vline(aes(xintercept = as.Date(eos_10_2018, origin = "2017-12-31"), colour = "Dormancy"), alpha = 1, linetype = 2) +
+    # scale_color_manual(breaks = pheno_ordered,
+    #                    values = pheno_cols,
+    #                    name = "Phenophase") +    
+    scale_color_manual(breaks = c("2017", "2018"),
+                       values = c("Black", "Grey30"),
+                       name = "Year") +    
+    scale_fill_manual(breaks=pheno_ordered,
+                      labels = c("Greenup", "Maturity", "Senescence", "Dormancy"),
+                       values = pheno_cols,
+                       name = "Phenophase") +  
+    scale_x_date(date_breaks = "1 months", 
+                 date_minor_breaks = "1 week",
+                 date_labels = "%b") + 
+    scale_y_continuous(breaks = c(0.3, 0.4, 0.5), limits = c(0.3, 0.52)) + 
+    labs(title = "Greenness in 2017 & 2018",
+         x = "Date", 
+         y = "Greenness") +
+    theme_bw() + 
+    theme(text = element_text(size = 35),
+          axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5),
+          axis.ticks = element_line(colour = "black", size = 1))
+p_phenodates
+
+```
+
+#### b. All phenodates in 2018 were significantly earlier
+t.test(phenodates ~ year) = all significant
+```{r t-test_phenodates_by_year}
+# sos_min
+t.test(x = phenodates2$sos_min_2017, 
+       y = phenodates2$sos_min_2018, 
+       paired = TRUE)
+as.Date(mean(phenodates2$sos_min_2017), origin = "2016-12-31")
+as.Date(mean(phenodates2$sos_min_2018), origin = "2017-12-31")
+
+
+# peak
+t.test(x = phenodates2$peak_2017, 
+       y = phenodates2$peak_2018, 
+       paired = TRUE)
+as.Date(mean(phenodates2$peak_2017), origin = "2016-12-31")
+as.Date(mean(phenodates2$peak_2018), origin = "2017-12-31")
+
+# eos_75
+t.test(x = phenodates2$eos_75_2017, 
+       y = phenodates2$eos_75_2018, 
+       paired = TRUE)
+as.Date(mean(phenodates2$eos_75_2017), origin = "2016-12-31")
+as.Date(mean(phenodates2$eos_75_2018), origin = "2017-12-31")
+
+# eos_10
+t.test(x = phenodates2$eos_10_2017, 
+       y = phenodates2$eos_10_2018, 
+       paired = TRUE)
+as.Date(mean(phenodates2$eos_10_2017), origin = "2016-12-31")
+as.Date(mean(phenodates2$eos_10_2018), origin = "2017-12-31")
+
+
+aggregate(sos_min ~ year, data = phenodates, FUN = mean)
+aggregate(sos_min ~ year, data = phenodates, FUN = calcSE)
+
+aggregate(peak ~ year, data = phenodates, FUN = mean)
+aggregate(peak ~ year, data = phenodates, FUN = calcSE)
+
+aggregate(eos_75 ~ year, data = phenodates, FUN = mean)
+aggregate(eos_75 ~ year, data = phenodates, FUN = calcSE)
+
+aggregate(eos_10 ~ year, data = phenodates, FUN = mean)
+aggregate(eos_10 ~ year, data = phenodates, FUN = calcSE)
+```
+
+ii.	box plot
+
+```{r phenodate-boxplot, fig.width=12, fig.height=10}
+# sos_min
+gu_year_bar <- ggplot(data = phenodates, 
+                      aes(x = as.factor(year), y = as.Date(sos_min, origin = "2017-12-31"),
+                          color = as.factor(year))) + 
+    geom_jitter(width = 0.1) + 
+    scale_color_manual(name = "Year", 
+                       breaks = c("2018", "2017"),
+                       values = c("Black", "Grey38")) + 
+    geom_boxplot(fill = "#a6d96a", alpha = 0.5, 
+                 outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    coord_flip() + 
+    scale_y_date(date_breaks = "2 weeks", 
+                 date_labels = "%b %d", 
+                 limits = c(as.Date(140, origin = "2017-12-31"), 
+                            as.Date(295, origin = "2017-12-31"))) + 
+    labs(x = "Year", y = "", title = "Greenup Date") + 
+    theme_bw() + 
+    theme(text = element_text(size=30),
+          axis.text.x = element_blank(),
+          legend.position = "none")
+
+# peak
+mat_year_bar <- ggplot(data = phenodates, 
+                       aes(x = as.factor(year), 
+                           y = as.Date(peak, origin = "2017-12-31"),
+                           color = as.factor(year))) + 
+    geom_jitter(width = 0.1) + 
+    scale_color_manual(name = "Year", 
+                       breaks = c("2018", "2017"),
+                       values = c("Black", "Grey38")) + 
+    geom_boxplot(fill = "#1a9641", alpha = 0.5, 
+                 outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    coord_flip() + 
+    scale_y_date(date_breaks = "2 weeks", 
+                 date_labels = "%b %d", 
+                 limits = c(as.Date(140, origin = "2017-12-31"), 
+                            as.Date(295, origin = "2017-12-31"))) + 
+    labs(x = "Year", y = "", title = "Maturity Date") + 
+    theme_bw() + 
+    theme(text = element_text(size=30),
+        axis.text.x = element_blank(),
+          legend.position = "none")
+
+# eos_75
+sen_year_bar <- ggplot(data = phenodates, 
+                       aes(x = as.factor(year),
+                           y = as.Date(eos_75, origin = "2017-12-31"),
+                           color = as.factor(year))) + 
+    geom_jitter(width = 0.1) + 
+    scale_color_manual(name = "Year", 
+                       breaks = c("2018", "2017"),
+                       values = c("Black", "Grey38")) + 
+    geom_boxplot(fill = "#fdae61", alpha = 0.5) + 
+    coord_flip() + 
+    scale_y_date(date_breaks = "2 weeks", date_labels = "%b %d", limits = c(as.Date(140, origin = "2017-12-31"), as.Date(295, origin = "2017-12-31"))) + 
+    labs(x = "Year", y = "", title = "Senescence Date") + 
+    theme_bw() + 
+    theme(text = element_text(size=30),
+        axis.text.x = element_blank(),
+          legend.position = "none")
+
+# eos_10
+dorm_year_bar <- ggplot(data = phenodates, 
+                        aes(x = as.factor(year),
+                            y = as.Date(eos_10, origin = "2017-12-31"),
+                            color = as.factor(year))) + 
+    geom_jitter(width = 0.1) + 
+    scale_color_manual(name = "Year", 
+                       breaks = c("2018", "2017"),
+                       values = c("Black", "Grey38")) + 
+    geom_boxplot(fill = "#d7191c", alpha = 0.5, 
+                 outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    coord_flip() + 
+    scale_y_date(date_breaks = "2 weeks", date_labels = "%b %d", limits = c(as.Date(140, origin = "2017-12-31"), as.Date(295, origin = "2017-12-31"))) + 
+    labs(x = "Year", y = "Date", title = "Dormancy Date")  + 
+    theme_bw() + 
+    theme(text = element_text(size=30),
+        axis.text.x = element_text(angle=45, hjust=1),
+          legend.position = "none")
+
+# Include all 4 boxplots
+grid.arrange(gu_year_bar, mat_year_bar, sen_year_bar, dorm_year_bar, 
+             ncol=1, heights = c(3,3,3,4.7))
+```
+
+
+
+#### c. Length of season was NOT different
+Length of season was defined as the time between sos_min and eos_10
+i.	sos_min occurred earlier at approximately same rate as eos_10
+ii.	t.test(length of season ~ year) = not significant
+```{r t-test_los}
+t.test(x = phenodates2$LOS_2017, 
+       y = phenodates2$LOS_2018, 
+       paired = TRUE)
+
+mean(phenodates2$LOS_2017)
+mean(phenodates2$LOS_2018)
+
+t.test(x = phenodates2$LOS2_2017, 
+       y = phenodates2$LOS2_2018, 
+       paired = TRUE)
+
+mean(phenodates2$LOS2_2017)
+mean(phenodates2$LOS2_2018)
+
+aggregate(los ~ year, data = phenodates, FUN = mean)
+aggregate(los ~ year, data = phenodates, FUN = calcSE)
+
+```
+iii.	Supports hypothesis 3 of Wijk et al. 2003?
+
+```{r}
+# eos_10
+los_year_bar <- ggplot(data = phenodates, 
+                        aes(x = as.factor(year),
+                            y = los,
+                            color = as.factor(year))) + 
+    geom_jitter(width = 0.1) + 
+    scale_color_manual(name = "Year", 
+                       breaks = c("2018", "2017"),
+                       values = c("Black", "Grey38")) + 
+    geom_boxplot(fill = "#d7191c", alpha = 0.5, 
+                 outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    coord_flip() + 
+    # scale_y_date(date_breaks = "2 weeks", date_labels = "%b %d") + 
+    labs(x = "Year", y = "Length of Season (days)")  + 
+    theme_bw() + 
+    theme(text = element_text(size=30),
+        axis.text.x = element_text(angle=45, hjust=0.5),
+          legend.position = "none")
+```
+
+
+### 2. DELETE??? Environmental drivers and phenodates
+
+##
+
+Environmental drivers did NOT have consistent responses to phenodates, except higher average soil moisture at 30 cm was significantly correlated with later peak dates
+
+#### a. Indicative of different plant communities? (See Q2)
+#### b. Make scatterplot of peak ~ soilM with color-coded plots to check if they match the community types found in the cluster analysis
+```{r peak~soilM}
+p_peak_sm <- ggplot(data = veg_meta, aes(color = as.factor(phenocam))) + 
+    # facet_wrap(~ phenocam) + 
+    geom_point(aes(x = sm5cm_mean_2018,
+                   y = peak_2018,
+                   shape = "2018"),
+               alpha = 0.7,
+               size = 5) + 
+    geom_text(aes(x = sm5cm_mean_2018,
+                  y = peak_2018,
+                  label = phenocam), 
+              # hjust=0, vjust=0,
+              # nudge_x = 0.1, nudge_y = 0.1,
+              size = 5) + 
+    theme_bw() + 
+    scale_shape_manual(name = "Year",
+                       values = c(19,1)) + 
+    scale_color_manual(name = "Phenocam", values = plot_cols_comm, breaks = plot_list)
+p_peak_sm
+```
+
+### 3. Overall patterns of greenness
+#### a. 2017 had small, but significantly higher max greenness 
+```{r max-greenness-by-year}
+greenness_summary$b <- runif(nrow(greenness_summary), -0.1, 0.1)
+p_max_greenness <-ggplot(greenness_summary) +
+  geom_boxplot(aes(x = as.numeric(year), 
+                   y = max_greenness,
+                   group = year,
+                   fill = as.factor(year)),
+               color = "grey40") +
+  geom_point(aes(x = as.numeric(year) + b, 
+                 y = max_greenness,
+                 color = as.factor(phenocam)),
+             size = 3, alpha = 0.7) +
+  geom_line(aes(x  = as.numeric(year) + b, 
+                y = max_greenness, 
+                group = as.factor(phenocam),
+                color = as.factor(phenocam))) +
+  scale_x_continuous(breaks = c(2017,2018), 
+                     labels = c("2017", "2018")) +
+  scale_color_manual(name = "Phenocam", values = plot_cols_comm, breaks = plot_list) + 
+  scale_fill_manual(name = "Year",
+                    values = c("grey80", "grey60")) + 
+    labs(x = "Year",
+         y = "Max Greenness") + 
+    theme_bw() + 
+    theme(text = element_text(size=30),
+          axis.text.x = element_text(angle=0, hjust=0.5))
+p_max_greenness
+```
+
+```{r t-test-max-greenness-by-year}
+greenness_summary <- greenness_summary %>% 
+    filter(phenocam != 18)
+
+greenness_summary2 <- greenness_summary %>% 
+    select(year, phenocam, max_greenness) %>% 
+    spread(year, max_greenness) %>% 
+    rename(max_2017 = '2017',
+           max_2018 = "2018") %>% 
+    mutate(max_diff = max_2017 - max_2018)
+
+t.test(x = greenness_summary$max_greenness[which(greenness_summary$year =='2018')], 
+       y = greenness_summary$max_greenness[which(greenness_summary$year =='2017')],
+       paired = TRUE)
+
+```
+i.	Contrasts with Wijk et al. 2003, which found increased GPP with earlier start date
+ii.	More evidence for Wijk’s periodic hypothesis (for this system)
+iii. Fits with phenology/growth of BISBIS in Walker et al. 1995
+
+
+## ii. Soil moisture
+```{r sm_phenodates_df}
+sm_phenodates_df <- data.frame(matrix(nrow = length(plot_list) + 2, ncol = 6))
+colnames(sm_phenodates_df) <- c("Phenocam", 
+                                "YEAR", 
+                                "sm5cm_gu10days_mean", 
+                                "sm5cm_mat10days_mean", 
+                                "sm5cm_sen10days_mean", 
+                                "sm5cm_dorm10days_mean")
+
+sm_phenodates_df <- data.frame(matrix(nrow = length(plot_list) + 2, ncol = 6))
+colnames(sm_phenodates_df) <- c("Phenocam", 
+                                "YEAR", 
+                                "Start of season", 
+                                "Peak greenness", 
+                                "Senescence", 
+                                "Dormancy")
+
+df1 <- sensor_daily
+df2 <- phenodates2018
+x <- plot_list
+year = 2018
+
+for(i in plot_list) {
+        plot <- i
+        i_num <- as.numeric(i) - 5
+        sm_phenodates_df$Phenocam[i_num] <- i
+        sm_phenodates_df$YEAR[i_num] <- year
+        GU_date <- df2$sos_min[which(df2$phenocam == i)]
+        Mat_date <- df2$peak[which(df2$phenocam == i)]
+        Sen_date <- df2$eos_75[which(df2$phenocam == i)]
+        Dorm_date <- df2$eos_75[which(df2$phenocam == i)]
+        df1_ploti <- df1 %>% 
+            filter(phenocam == i & YEAR == year)
+        
+        # sos_min
+        df1_ploti_gu <- df1_ploti %>% 
+            filter(doy >= GU_date - 5 & doy <= GU_date + 5) %>% 
+            summarise(sm5cm_mean = mean(sm5cm_daily_mean, na.rm = TRUE))
+        sm_phenodates_df$sos_min[i_num] <- df1_ploti_gu[1,1]
+        
+        # peak
+        df1_ploti_mat <- df1_ploti %>% 
+            filter(doy >= Mat_date - 5 & doy <= Mat_date + 5) %>% 
+            summarise(sm5cm_mean = mean(sm5cm_daily_mean, na.rm = TRUE))
+        sm_phenodates_df$peak[i_num] <- df1_ploti_mat[1,1]
+
+        # eos_75
+        df1_ploti_sen <- df1_ploti %>% 
+            filter(doy >= Sen_date - 5 & doy <= Sen_date + 5) %>% 
+            summarise(sm5cm_mean = mean(sm5cm_daily_mean, na.rm = TRUE))
+        sm_phenodates_df$eos_75[i_num] <- df1_ploti_sen[1,1]  
+        
+        # eos_10
+        df1_ploti_dorm <- df1_ploti %>% 
+            filter(doy >= Dorm_date - 5 & doy <= Dorm_date + 5) %>% 
+            summarise(sm5cm_mean = mean(sm5cm_daily_mean, na.rm = TRUE))
+        sm_phenodates_df$eos_10[i_num] <- df1_ploti_dorm[1,1]    
+    }
+
+sm_phenodates_df <- sm_phenodates_df %>%
+    filter(!is.na(Phenocam))
+
+sm_phenodates_df2 <- sm_phenodates_df %>% 
+    gather(key = "Phenodate", "SoilM", sos_min:eos_10)
+
+phenodates2018_gather <- phenodates2018 %>% 
+    gather(key = "Phenodate", "DOY")
+# 
+# sm_phenodates_merge <- merge(sm_phenodates_df, phenodates2018, by.x = "Phenocam", by.y = "phenocam")
+# 
+
+```
+
+```{r sm_data_manipulation}
+# 1. subset to get only soil moisture values from before sos_min and after eos_75
+## Use phenodates2 to determine start and end of each plot
+source("functions/subset_sensor_data_by_phenodates2.R")
+subset_by_phenodate(df1 = sensor_daily, df2 = phenodates2018, x = plot_list, year = 2018)
+
+sennet_subset_by_phenodate <- sennet_subset_by_phenodate %>% 
+    mutate(doy = as.numeric(strftime(DATE, "%j")))
+
+sennet_subset_by_phenodate_comm <- merge(sennet_subset_by_phenodate, communities[1:2],
+                                         by.x = "phenocam", by.y = "plot")
+
+sennet_subset_by_phenodate_comm_pheno <- merge(sennet_subset_by_phenodate_comm, phenodates)
+```
+
+### 1. Soil moisture is predicted to be a limiting factor in growth, especially at the end of the season
+a.	No significant relationship was found
+b.	Lm(eos_75/eos_10 ~ soil VMC minimums)
+
+```{r soilM_phenocam_boxplot}
+p_sm_pheno <- ggplot(sm_phenodates_df2,
+                     aes(x = factor(sm_phenodates_df2$Phenodate, 
+                                    levels = c("sos_min", "peak", "eos_75", "eos_10")), 
+                         y = SoilM,
+                         fill = Phenodate)) + 
+    geom_boxplot(outlier.shape = 1) + 
+    geom_jitter(width = 0.1, aes(color = as.factor(as.numeric(Phenocam)))) + 
+    scale_fill_manual(breaks=c("Start of Season","Peak Greenness","Start of Senescence", "End of Season"),
+                      values = pheno_cols,
+                      name = "Phenophase") + 
+    scale_x_discrete(labels = c("sos_min" = "Start of\nSeason",
+                                "peak" = "Peak\nGreenness",
+                                "eos_75" = "Start of\nSenescence",
+                                "eos_10" = "End of Season")) + 
+    scale_color_manual(name = "Phenocam", 
+                       values = plot_cols_comm, 
+                       breaks = plot_list) + 
+    labs(x = "Phenophase",
+         y = "Soil Moisture at 5 cm\n(VWC)") + 
+    theme_bw() + 
+    theme(text = element_text(size = 30),
+          axis.text.x = element_text(angle = 0, hjust = 0.5),
+          axis.ticks = element_line(colour = "black", size = 1),
+          legend.position = "none")    
+p_sm_pheno
+```
+
+```{r lme_sm_phenodates}
+sm_phenodates_df3 <- merge(sm_phenodates_df2, communities[1:2],
+                           by.x = "Phenocam", by.y = "plot")
+sm_comm_summary <- aggregate(SoilM ~ Phenodate*Comm_ClusterWard, data = sm_phenodates_df3, FUN = mean) %>% 
+    rename(sm_mean = SoilM)
+sm_comm_summary2 <- aggregate(SoilM ~ Phenodate*Comm_ClusterWard, data = sm_phenodates_df3, FUN = sd) %>% 
+    rename(sm_sd = SoilM)
+sm_comm_pheno_summary <- merge(sm_comm_summary, sm_comm_summary2)
+
+summary(aov(SoilM ~ Phenodate, data = sm_phenodates_df3))
+# lm(Phenodate ~ SoilM*Comm_ClusterWard, data = sm_phenodates_df3)
+
+lme_sm_phenodates <- lme(SoilM ~ Phenodate,
+                         random = ~1|Phenocam,
+                         data = sm_phenodates_df2,
+                         na.action = na.omit)
+summary(lme_sm_phenodates)
+Anova(lme_sm_phenodates)
+anova(lme_sm_phenodates)
+#intervals(lme_sm_phenodates)
+
+x = residuals(lme_sm_phenodates)
+library(rcompanion)
+plotNormalHistogram(x)
+plot(fitted(lme_sm_phenodates),residuals(lme_sm_phenodates))
+# Test random effect (site)
+# model1 <- gls(SoilM ~ Phenodate, 
+#               correlation = corAR1(form = ~ 1 | Phenocam),
+#               data = sm_phenodates_df2, 
+#               na.action = na.omit, 
+#               method = "REML")
+# anova(model, model1) # Site significant
+
+```
+
+```{r sm_over_time_comm_facet}
+p_sm_gs_comm <- ggplot(data = sennet_subset_by_phenodate_comm, 
+                  aes(x = as.Date(doy, origin = "2017-12-31"), 
+                      y = sm5cm_3day10th,
+                      group = phenocam)) + 
+    facet_wrap(~ Comm_ClusterWard, scales = "free") + 
+    geom_path(aes(color = phenocam)) + 
+    # geom_smooth(method = "lm") + 
+    labs(x = "Date", y = "Soil Moisture at 5 cm\n(mean growing season VWC)") +
+    theme_bw() +
+    theme(text = element_text(size = 30),
+          axis.text.x = element_text(angle = 0, hjust = 0.5),
+          axis.ticks = element_line(colour = "black", size = 1),
+          legend.position = "none")
+p_sm_gs_comm
+```
+
+### 2. Soil moisture significantly decreased over the growing season
+a.	Lm(soil VMC ~ date)
+```{r subset_soilM_by_growing_season}
+sensor_gs_summary <- sennet_subset_by_phenodate %>% 
+    filter(airtemp_daily_mean > 0) %>% 
+    group_by(phenocam) %>% 
+    summarize(sm5cm_gs_mean = mean(sm5cm_daily_mean, na.rm = TRUE),
+              sm5cm_gs_mean_3day90th = mean(sm5cm_3day90th, na.rm = TRUE),
+              sm5cm_gs_min = min(sm5cm_daily_mean, na.rm = TRUE),
+              sm5cm_gs_min_3day10 = min(sm5cm_3day10th, na.rm = TRUE),
+              sm30cm_gs_mean = mean(sm30cm_daily_mean, na.rm = TRUE),
+              sm30cm_gs_mean_3day90th = mean(sm30cm_3day90th, na.rm = TRUE),
+              sm30cm_gs_min = min(sm30cm_daily_mean, na.rm = TRUE),
+              stemp5_gs_mean = mean(stemp5_daily_mean, na.rm = TRUE),
+              stemp30_gs_mean = mean(stemp30_daily_mean, na.rm = TRUE),
+              airtemp_gs_mean = mean(airtemp_daily_mean, na.rm = TRUE),
+              airtemp_tdd = sum(airtemp_daily_mean))
+
+```
+
+```{r soilM_overtime_facet, fig.height=12, fig.width=12}
+p_sm_gs <- ggplot(data = sennet_subset_by_phenodate, 
+                  aes(x = as.Date(doy, origin = "2017-12-31"), y = round(sm5cm_daily_mean, 2))) + 
+    facet_wrap(~ factor(phenocam, levels = comm_order), scales = "free_y", ncol = 3) + 
+    geom_path() + 
+    geom_smooth(method = "lm") + 
+    labs(x = "\nDate", y = "Soil Moisture at 5 cm\n(mean growing season VWC)\n") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) + 
+    theme_bw() +
+    theme(text = element_text(size = 20),
+          axis.text.x = element_text(angle = 0, hjust = 0.5),
+          axis.ticks = element_line(colour = "black", size = 1),
+          legend.position = "none")
+p_sm_gs
+```
+
+```{r lm_soilM_v_time}
+i <- plot_list[1]
+lm_soilM_doy_m <- matrix(nrow = length(plot_list) + 6, 
+                           ncol = 6)
+lm_soilM_doy_df <- data.frame(lm_soilM_doy_m)
+colnames(lm_soilM_doy_df) <- c("Phenocam", "Intercept_estimate", "Intercept_p", "DOY_estimate", "DOY_p", "R-squared")
+
+plot_list <- as.character(unique(sennet_subset_by_phenodate$phenocam))
+for(i in plot_list) {
+    subset <- subset(sennet_subset_by_phenodate, phenocam == i) %>%
+        filter(!is.na(sm5cm_daily_mean))
+    i_num <- as.numeric(i) - 5
+    lm_soilM_doy_df$Phenocam[i_num] <- i
+    temp_lm <- lm(sm5cm_daily_mean ~ doy, data = subset)
+    lm_soilM_doy_df$Intercept_estimate[i_num]<- temp_lm$coefficients[1]
+    lm_soilM_doy_df$Intercept_p[i_num] <- summary(temp_lm)$coefficients[1,4]
+    lm_soilM_doy_df$DOY_estimate[i_num] <- temp_lm$coefficients[2]
+    lm_soilM_doy_df$DOY_p[i_num] <- summary(temp_lm)$coefficients[2,4]
+    lm_soilM_doy_df$`R-squared`[i_num] <-  summary(temp_lm)$r.squared
+}
+
+lm_soilM_doy_df <- lm_soilM_doy_df %>% drop_na
+kable(lm_soilM_doy_df)
+write.csv(lm_soilM_doy_df, file = "data_master/lm_soilM_doy.csv", row.names=FALSE)
+```
+
+### 3. Soil Moisture effects on greenness
+
+```{r lm_soilM_v_green}
+
+i <- plot_list[1]
+lm_soilM_greenness_m <- matrix(nrow = length(plot_list) + 7, 
+                               ncol = 6)
+lm_soilM_greenness_df <- data.frame(lm_soilM_greenness_m)
+colnames(lm_soilM_greenness_df) <- c("Phenocam", "Intercept_estimate", "Intercept_p", "Estimate", "p_value", "R_squared")
+
+plot_list <- as.character(unique(sennet_subset_by_phenodate$phenocam))
+i <- plot_list[1]
+for(i in plot_list) {
+    subset <- subset(sennet_data, phenocam == i) %>%
+        filter(!is.na(sm5cm_daily_mean))
+    i_num <- as.numeric(i) - 5
+    lm_soilM_greenness_df$Phenocam[i_num] <- i
+    temp_lm <- lm(max.filtered ~ sm5cm_daily_mean, data = subset)
+    lm_soilM_greenness_df$Intercept_estimate[i_num]<- temp_lm$coefficients[1]
+    lm_soilM_greenness_df$Intercept_p[i_num] <- summary(temp_lm)$coefficients[1,4]
+    lm_soilM_greenness_df$Estimate[i_num] <- temp_lm$coefficients[2]
+    lm_soilM_greenness_df$p_value[i_num] <- summary(temp_lm)$coefficients[2,4]
+    lm_soilM_greenness_df$R_squared[i_num] <-  summary(temp_lm)$r.squared
+}
+
+lm_soilM_greenness_df <- lm_soilM_greenness_df %>% drop_na
+lm_soilM_greenness_comm <- merge(lm_soilM_greenness_df, communities[1:2],
+                                 by.x = "Phenocam", by.y = "plot") %>% 
+    arrange(Comm_ClusterWard)
+kable(lm_soilM_greenness_comm)
+
+mean_R2_green_v_sm5 <- aggregate(R_squared ~ Comm_ClusterWard, data = lm_soilM_greenness_comm, FUN = mean)
+kable(mean_R2_green_v_sm5)
+```
+
+```{r lme_R2_by_comm}
+sennet_data_comm <- merge(sennet_data, communities[1:2],
+                          by.x = "phenocam", by.y = "plot")
+
+lme_greenness_comm <- lme(max.filtered ~ sm5cm_daily_mean, 
+               random = ~1|Comm_ClusterWard/phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = sennet_data_comm)
+summary(lme_greenness_comm)
+anova(lme_greenness_comm)
+```
+
+
+```{r lme_greenness_sm5_mean}
+# greenness ~ soil moisture
+lme_greenness_null <- lme(max.filtered ~ 1, 
+               random = ~1|phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = sennet_data)
+summary(lme_greenness_null)
+
+lme_greenness_sm5_mean <- lme(max.filtered ~ sm5cm_daily_mean, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = sennet_data)
+summary(lme_greenness_sm5_mean)
+#coef(lme_greenness_sm5_mean)
+
+Anova(lme_greenness_sm5_mean)
+anova(lme_greenness_sm5_mean)
+#intervals(lme_greenness_sm5_mean)
+x = residuals(lme_greenness_sm5_mean)
+plotNormalHistogram(x)
+plot(fitted(lme_greenness_sm5_mean),residuals(lme_greenness_sm5_mean))
+
+```
+
+```{r lme_greenness_sm5_min}
+# greenness ~ soil moisture
+lme_greenness_sm5_min <- lme(max.filtered ~ sm5cm_3day10th, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = sennet_data)
+summary(lme_greenness_sm5_min)
+#coef(lme_greenness_sm5_min)
+
+Anova(lme_greenness_sm5_min)
+anova(lme_greenness_sm5_min)
+#intervals(lme_greenness_sm5_min)
+x = residuals(lme_greenness_sm5_min)
+plotNormalHistogram(x)
+plot(fitted(lme_greenness_sm5_min),residuals(lme_greenness_sm5_min))
+
+# output <- lm.mult(sennet_data, x = "sm5cm_3day10th", y = "max.filtered", list = plot_list)
+```
+
+```{r lme_greenness_sm5_max90}
+# greenness ~ soil moisture
+lme_greenness_sm5_max90 <- lme(max.filtered ~ sm5cm_3day90th, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = sennet_data)
+summary(lme_greenness_sm5_max90)
+#coef(lme_greenness_sm5_max90)
+Anova(lme_greenness_sm5_max90)
+anova(lme_greenness_sm5_max90)
+#intervals(lme_greenness_sm5_max90)
+x = residuals(lme_greenness_sm5_max90)
+plotNormalHistogram(x)
+plot(fitted(lme_greenness_sm5_max90),residuals(lme_greenness_sm5_max90))
+
+```
+
+```{r greenness~sm5cm_3day10th}
+p_green_v_sm <- ggplot(data = sennet_data, 
+                       aes(x = sm5cm_3day10th, y = max.filtered, 
+                           color = doy)) + 
+    facet_wrap(~as.factor(phenocam)) + 
+    scale_color_gradientn(name = "Day of Year",
+                          colors = rainbow(3)) +
+    scale_x_continuous(breaks = c(0, 0.5, 1.0)) + 
+    geom_point() + 
+    labs(x = "Soil Moisture 3 day lows\n(10th percentile, 5 cm)", 
+         y = "Greenness") + 
+    theme_bw() + 
+    theme(text = element_text(size=40))
+p_green_v_sm
+```
+
+```{r}
+# Soil moisture time series with greenness bar
+sennet_data2 <- sennet_data %>% 
+    select(date, phenocam, doy, max.filtered, year, sm5cm_3day10th, sm30cm_3day10th) %>% 
+    rename("5 cm" = sm5cm_3day10th ,
+           "30 cm" = sm30cm_3day10th) %>% 
+    gather("depth", "soilM_3day10th", c("5 cm", "30 cm"))
+
+p_sm2 <- ggplot(data = sennet_data2, aes(x = as.Date(date), linetype = depth)) + 
+    geom_point(aes(y = 0, color = max.filtered), size = 5, alpha = 0.25) + 
+    geom_line(aes(y = soilM_3day10th), size = 2) + 
+    # geom_line(aes(y = sm5cm_3day10th), color = "black", size = 1) +
+    # geom_line(aes(y = sm30cm_3day10th), color = "darkgrey", size = 1) +
+    facet_wrap(~as.factor(phenocam), scales = "free") + 
+    # ylim(min(sennet_data$sm5cm_daily_min), max(sennet_data$sm5cm_daily_min)) +
+    scale_x_date(date_breaks = "1 month", 
+                 date_labels = "%b", 
+                 limits = c(as.Date("2018-05-25"), 
+                            as.Date("2018-09-01"))) +
+    # scale_color_brewer("Greens") +
+    ylim(0,1) + 
+    scale_color_gradient(name = "Greenness",
+                         low = "#ffffcc", high = "#005a32") +
+    labs(title = "Soil Moisture (5 cm & 30 cm, 3 day 90th) 2018",
+         x = "Date",
+         y = "Soil moisture (VMC)")   + 
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=45, hjust=0.5))
+p_sm2
+```
+
+## iii. Soil temp
+### 1. In 2018, soil temp = a proxy for snow-off date
+### 2. Soil temp correlates strongly with greenness
+a.	Lm(greenness ~ soil temp)
+```{r lme_green_v_stemp5max90}
+# greenness ~ soil temp
+lme_greenness_stemp5_max90 <- lme(max.filtered ~ stemp5_3day90th, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = sennet_data)
+summary(lme_greenness_stemp5_max90)
+#coef(lme_greenness_stemp5_max90)
+Anova(lme_greenness_stemp5_max90)
+anova(lme_greenness_stemp5_max90)
+#intervals(lme_greenness_stemp5_max90)
+x = residuals(lme_greenness_stemp5_max90)
+plotNormalHistogram(x)
+plot(fitted(lme_greenness_stemp5_max90),
+     residuals(lme_greenness_stemp5_max90))
+
+```
+
+b.	Artifact of summer/growing season pattern, rather than a true causal relationship?
+
+c.	Two years of data (and only one of soil temp) is not enough to identify pattern, therefore maybe skip this story?
+
+
+### 3. Across all plots, is there a predictable pattern for when soil temp reaches a critical threshold for sos_min? Speed to peak?
+
+a.	Lm(sos_min ~ soil temp 5 cm)
+
+b.	Lm(sos_min to peak ~ soil temp 5 cm)
+
+
+### 4. Does date of spring thaw affect sos_min/peak date?
+
+a.	Date of soil thaw = start of plant productive opportunity (see references in Wijk et al. 2003) 
+```{r soil-thaw_df}
+soil_freeze <- sennet_data %>% 
+    filter(stemp5_daily_mean < 0,
+           date < "2018-08-01") %>% 
+    group_by(phenocam) %>% 
+    summarise(fall_freeze_date = min(date))
+
+soil_thaw <- sennet_data %>% 
+    filter(stemp5_daily_mean > 0,
+           date > "2018-01-01") %>% 
+    group_by(phenocam) %>% 
+    summarise(spring_thaw_date = min(date))
+
+soil_thaw_season <- merge(soil_freeze, soil_thaw, all = TRUE) %>% 
+    mutate(thawed_los = as.Date(fall_freeze_date) - as.Date(spring_thaw_date),
+           spring_thaw_doy = as.numeric(strftime(spring_thaw_date, "%j")),
+           fall_freeze_doy = as.numeric(strftime(fall_freeze_date, "%j")))
+
+soil_thaw_pheno <- merge(soil_thaw_season, phenodates2018) %>% 
+    filter(phenocam != "17")
+
+soil_thaw_pheno <- merge(soil_thaw_pheno, communities, 
+                         by.x = "phenocam", by.y = "plot")
+
+```
+
+b.	Predict that later spring thaw = later sos_min/peak dates
+Lm(sos_min/peak date ~ spring soil thaw date)
+
+*There is no significant relationship between phenodates and thaw date*
+```{r lm_thaw_phenodates}
+# sos_min
+lm_thaw_gu <- lm(sos_min_2018 ~ spring_thaw_doy, data = soil_thaw_pheno)
+summary(lm_thaw_gu)
+
+lme_thaw_gu_comm <- lme(sos_min_2018 ~ 1 + spring_thaw_doy, 
+                        data = soil_thaw_pheno, 
+                        random = ~ 1 | Comm_ClusterWard, 
+                        na.action = na.omit)
+anova(lme_thaw_gu_comm)
+
+# eos_75
+lm_thaw_sen <- lm(eos_75_2018 ~ spring_thaw_doy, data = soil_thaw_pheno)
+summary(lm_thaw_sen)
+
+# peak
+lm_thaw_mat <- lm(peak_2018 ~ spring_thaw_doy, data = soil_thaw_pheno)
+summary(lm_thaw_mat)
+
+```
+
+### 5. Does soil temperature drive end of season phenology?
+a.	Prediction: soil freeze in autumn ends the season (Wijk et al. 2003; hypothesis 1)
+b.	Lm(eos_75/eos_10 date ~ fall soil freeze date)
+```{r}
+# eos_10
+lm_freeze_dorm <- lm(eos_10_2018 ~ fall_freeze_doy, data = soil_thaw_pheno)
+summary(lm_freeze_dorm)
+```
+
+```{r}
+p_freeze_dorm <- ggplot(data = soil_thaw_pheno,
+                        aes(x = fall_freeze_doy,
+                            y = eos_10_2018)) + 
+    geom_point() + 
+    geom_smooth(method = "lm") + 
+    theme_bw()
+
+p_freeze_dorm
+```
+
+### 6. Lm(length of season ~ soil thaw days)
+```{r}
+p_thaw_los <- ggplot(data = soil_thaw_pheno,
+                     aes(x = thawed_los,
+                         y = LOS_2018)) + 
+    geom_point() + 
+    geom_smooth(method = "lm") + 
+    theme_bw() 
+
+p_thaw_los
+```
+
+```{r}
+# Length of Season
+lm_thaw_los <- lm(LOS_2018 ~ thawed_los, data = soil_thaw_pheno)
+summary(lm_thaw_los)
+```
+
+## iv. Snow-off date
+### 1. Snow-off date available in 2017 only
+### 2. Does snow-off date predict sos_min/peak date?
+a.	Lm(sos_min date ~ snowoff date) is significant!
+```{r}
+veg_meta$SnowmeltDate_2017 <- as.Date(veg_meta$SnowmeltDate_2017, "%m/%d/%y")
+
+veg_meta <- veg_meta %>% 
+    mutate(SnowmeltDate_2017 = as.Date(veg_meta$SnowmeltDate_2017, "%m/%d/%y")) %>% 
+    mutate(SnowmeltDOY_2017 = as.numeric(strftime(as.Date(SnowmeltDate_2017, "%m/%d/%y"), "%j")))
+
+lm_gu_melt <- lm(sos_min_2017 ~ SnowmeltDOY_2017, data = veg_meta)
+summary(lm_gu_melt)
+plot(sos_min_2017 ~ SnowmeltDOY_2017, data = veg_meta)
+```
+
+b.	Lm(peak date ~ snowoff date) is marginally significant for 2017
+```{r}
+lm_mat_melt <- lm(peak_2017 ~ SnowmeltDOY_2017, data = veg_meta)
+summary(lm_mat_melt)
+
+```
+
+### 3. Do plots with later snowoff sos_min faster?
+No they don't.
+a.	Reference citations from Walker et al. 1995
+b.	Lm(sos_min to peak speed ~ snowoff date)
+```{r gu_to_mat}
+veg_meta <- veg_meta %>% 
+    mutate(gu_to_mat_2017 = peak_2017 - sos_min_2017)
+
+lm_gu2mat_melt <- lm(gu_to_mat_2017 ~ SnowmeltDOY_2017, data = veg_meta)
+summary(lm_gu2mat_melt)
+
+plot(gu_to_mat_2017 ~ SnowmeltDOY_2017, data = veg_meta)
+```
+
+## v. Air temperature
+
+```{r airtemp_frost_df}
+sennet_data_pheno <- merge(sennet_data, phenodates, phenodates,
+                           by.x = c("phenocam", "YEAR"), by.y = c("phenocam", "year"))
+frost_last_spring <- sennet_data_pheno %>% 
+    filter(YEAR == 2018) %>% 
+    group_by(phenocam) %>% 
+    filter(airtemp_daily_min < 0,
+           doy > sos_min,
+           doy <= peak) %>% 
+    summarise(sos_frost_events = length(date),
+              last_frost = min(date))
+
+frost_first_fall <- sennet_data_pheno %>% 
+    filter(YEAR == 2018) %>% 
+    group_by(phenocam) %>% 
+    filter(airtemp_daily_min < 0,
+           doy > peak,
+           doy <= eos_10) %>% 
+    summarise(eos_frost_events = length(date),
+              first_frost = min(date))
+
+frost_free_season <- merge(frost_last_spring, frost_first_fall, all = TRUE)
+```
+
+```{r tdd_df}
+# Greenup to maturity
+sensor_tdd_gu_to_mat <- sennet_subset_by_phenodate_comm_pheno %>% 
+    filter(airtemp_daily_mean > 0,
+           doy >= sos_min,
+           doy <= peak) %>% 
+    group_by(phenocam) %>% 
+    summarize(airtemp_tdd = sum(airtemp_daily_mean))
+
+phenodates_gu_to_mat <- phenodates %>% 
+    filter(year == 2018) %>% 
+    select(phenocam, year, sos_min, peak, los) %>% 
+    mutate(gu_to_mat = peak - sos_min)
+
+sensor_tdd_summary_gu_to_mat <- merge(sensor_tdd_gu_to_mat, phenodates_gu_to_mat)
+
+# greenup to maturity
+summary(lm(gu_to_mat ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_mat))
+plot(gu_to_mat ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_mat)
+
+summary(lm(peak ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_mat))
+plot(peak ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_mat)
+
+summary(lm(gu_to_mat ~ los, data = sensor_tdd_summary_gu_to_mat))
+plot(peak ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_mat)
+```
+
+```{r tdd_gu_to_sen}
+# Greenup to Senescence
+sensor_tdd_gu_to_sen <- sennet_subset_by_phenodate_comm_pheno %>% 
+    filter(airtemp_daily_mean > 0,
+           doy >= sos_min,
+           doy <= eos_75) %>% 
+    group_by(phenocam) %>% 
+    summarize(airtemp_tdd = sum(airtemp_daily_mean))
+
+phenodates_gu_to_sen <- phenodates %>% 
+    filter(year == 2018) %>% 
+    select(phenocam, year, eos_75, sos_min, los) %>% 
+    mutate(gu_to_sen = eos_75 - sos_min)
+
+sensor_tdd_summary_gu_to_sen <- merge(sensor_tdd_gu_to_sen, phenodates_gu_to_sen)
+
+# greenup to maturity
+summary(lm(gu_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_sen))
+plot(gu_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_sen)
+
+summary(lm(eos_75 ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_sen))
+plot(peak ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_mat)
+```
+
+```{r}
+# Greenup to Dormancy
+sensor_tdd_gu_to_dorm <- sennet_subset_by_phenodate_comm_pheno %>% 
+    filter(airtemp_daily_mean > 0,
+           doy >= sos_min,
+           doy <= eos_10) %>% 
+    group_by(phenocam) %>% 
+    summarize(airtemp_tdd = sum(airtemp_daily_mean))
+
+phenodates_gu_to_dorm <- phenodates %>% 
+    filter(year == 2018) %>% 
+    select(phenocam, year, eos_10, sos_min) %>% 
+    mutate(gu_to_dorm = eos_10 - sos_min)
+
+sensor_tdd_summary_gu_to_dorm <- merge(sensor_tdd_gu_to_dorm, phenodates_gu_to_dorm)
+
+# greenup to maturity
+summary(lm(gu_to_dorm ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_dorm))
+plot(gu_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_sen)
+
+summary(lm(eos_75 ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_sen))
+plot(peak ~ airtemp_tdd, data = sensor_tdd_summary_gu_to_mat)
+```
+
+```{r}
+# Maturity to Senescence
+sensor_tdd_mat_to_sen <- sennet_subset_by_phenodate_comm_pheno %>% 
+    filter(airtemp_daily_mean > 0,
+           doy >= peak,
+           doy <= eos_75) %>% 
+    group_by(phenocam) %>% 
+    summarize(airtemp_tdd = sum(airtemp_daily_mean))
+
+phenodates_mat_to_sen <- phenodates %>% 
+    filter(year == 2018) %>% 
+    select(phenocam, year, eos_75, peak) %>% 
+    mutate(mat_to_sen = eos_75 - peak)
+
+sensor_tdd_summary_mat_to_sen <- merge(sensor_tdd_mat_to_sen, phenodates_mat_to_sen)
+
+# mat_to_sen
+summary(lm(mat_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen))
+plot(mat_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen)
+
+summary(lm(eos_75 ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen))
+plot(eos_75 ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen)
+```
+
+```{r}
+# Senescence to Dormancy
+sensor_tdd_mat_to_sen <- sennet_subset_by_phenodate_comm_pheno %>% 
+    filter(airtemp_daily_mean > 0,
+           doy >= peak,
+           doy <= eos_75) %>% 
+    group_by(phenocam) %>% 
+    summarize(airtemp_tdd = sum(airtemp_daily_mean))
+
+phenodates_mat_to_sen <- phenodates %>% 
+    filter(year == 2018) %>% 
+    select(phenocam, year, eos_75, peak) %>% 
+    mutate(mat_to_sen = eos_75 - peak)
+
+sensor_tdd_summary_mat_to_sen <- merge(sensor_tdd_mat_to_sen, phenodates_mat_to_sen)
+
+# mat_to_sen
+summary(lm(mat_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen))
+plot(mat_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen)
+
+summary(lm(eos_75 ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen))
+plot(eos_75 ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen)
+```
+
+
+```{r tdd_v_green}
+green_summary_comm <- merge(greenness_summary, communities, by.x = "phenocam", by.y = "plot")
+sensor_green_gs_summary <- merge(green_summary_comm, sensor_gs_summary) %>% 
+    filter(year == 2018)
+summary(lm(max_greenness ~ airtemp_tdd, data = sensor_green_gs_summary))
+summary(lm(sm5cm_gs_mean ~ airtemp_tdd, data = sensor_green_gs_summary))
+
+plot(mat_to_sen ~ airtemp_tdd, data = sensor_tdd_summary_mat_to_sen)
+```
+
+# Q2: How do phenology and phenological responsiveness differ across the landscape? 
+
+## i. Spatial heterogeneity
+
+### 1. Walker et al. 1995 found more variability in growth between communities than between years
+
+### 2. Overall greenness patterns differed across the landscape
+a.	Lme(max greenness ~ community)
+Max greenness was significantly higher for DM3, MM, WM, and SA
+```{r lme_maxgreen_v_community}
+green_summary_comm <- merge(greenness_summary, communities, 
+                            by.x = "phenocam", by.y = "plot", all.y = TRUE)
+
+# greenness ~ soil temp
+lme_maxgreen_comm <- lme(max_greenness ~ Comm_ClusterWard, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = green_summary_comm)
+summary(lme_maxgreen_comm)
+#coef(lme_maxgreen_comm)
+Anova(lme_maxgreen_comm)
+anova(lme_maxgreen_comm)
+#intervals(lme_maxgreen_comm)
+x = residuals(lme_maxgreen_comm)
+plotNormalHistogram(x)
+plot(fitted(lme_maxgreen_comm),
+     residuals(lme_maxgreen_comm))
+
+```
+
+```{r boxplot_maxgreenness_by_comm}
+# For some reason, it doesn't want to knit because of the number of communities. Weird.
+ggplot(data = green_summary_comm, 
+       aes(x = Comm_ClusterWard, y = max_greenness,
+           fill = Comm_ClusterWard)) + 
+    geom_jitter(aes(color = as.factor(phenocam)),
+                width = 0.1, alpha = 1) + 
+    geom_boxplot(alpha = 0.5) + 
+    facet_wrap(~year) + 
+    scale_color_manual(name = "Phenocam", values = plot_cols_comm, breaks = plot_list) + 
+    scale_fill_manual(values = comm_cols) +
+    labs(x = "Plant Community",
+         y = "Max Greenness (GCC)") + 
+    theme_bw()
+```
+
+### 3. Phenology was relatively constant across communities
+a. Figure of phenodates & greenness curves  
+b. Lme(phenophases ~ community)
+```{r lme_pheno_comm}
+pheno_comm <- merge(phenodates, communities, by.x = "phenocam", by.y = "plot")
+
+# sos_min ~ soil temp
+lme_gu_comm <- lme(sos_min ~ Comm_ClusterWard, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = pheno_comm)
+summary(lme_gu_comm)
+#coef(lme_gu_comm)
+Anova(lme_gu_comm)
+anova(lme_gu_comm)
+# intervals(lme_gu_comm)
+x = residuals(lme_gu_comm)
+plotNormalHistogram(x)
+plot(fitted(lme_gu_comm),
+     residuals(lme_gu_comm))
+
+# peak ~ soil temp
+lme_mat_comm <- lme(peak ~ Comm_ClusterWard, 
+               random = ~1 |phenocam,
+               correlation=corCompSymm(form=~1|phenocam),
+               na.action = na.exclude,
+               method = "REML",
+               data = pheno_comm)
+summary(lme_mat_comm)
+#coef(lme_mat_comm)
+Anova(lme_mat_comm)
+anova(lme_mat_comm)
+#intervals(lme_mat_comm)
+x = residuals(lme_mat_comm)
+plotNormalHistogram(x)
+plot(fitted(lme_mat_comm),
+     residuals(lme_mat_comm))
+
+# eos_75 ~ soil temp
+lme_sen_comm <- lme(eos_75 ~ Comm_ClusterWard, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = pheno_comm)
+summary(lme_sen_comm)
+#coef(lme_sen_comm)
+Anova(lme_sen_comm)
+anova(lme_sen_comm)
+#intervals(lme_sen_comm)
+x = residuals(lme_sen_comm)
+plotNormalHistogram(x)
+plot(fitted(lme_sen_comm),
+     residuals(lme_sen_comm))
+
+# eos_10 ~ soil temp
+lme_dorm_comm <- lme(eos_10 ~ Comm_ClusterWard, 
+               random = ~1 |phenocam, 
+               na.action = na.exclude,
+               method = "REML",
+               data = pheno_comm)
+summary(lme_dorm_comm)
+#coef(lme_dorm_comm)
+Anova(lme_dorm_comm)
+anova(lme_dorm_comm)
+#intervals(lme_dorm_comm)
+x = residuals(lme_dorm_comm)
+plotNormalHistogram(x)
+plot(fitted(lme_dorm_comm),
+     residuals(lme_dorm_comm))
+
+```
+
+c. Lme(length of season ~ community)
+## ii. Are some communities more responsive (i.e. shifted their phenology) more than others?
+
+### Define communities
+
+```{r NMDS-PERMANOVA-clustering-data-prep}
+# Transform data to be readable by vegan package (create a dataframe with species as columns, plots as rows, and abundance of species as the values.)
+
+# Merge and transform data
+veg_comm <- merge(veg, communities, by.x = c("sensor_node"), by.y = c("plot"))
+veg_sensorsum <- merge(veg_comm, sensor_gs_summary, 
+                       by.x = "sensor_node", by.y = "phenocam",
+                       all = TRUE)
+veg_pheno <- merge(veg_sensorsum, phenodates, 
+                   by.x = c("sensor_node", "year"), 
+                   by.y = c("phenocam", "year"),
+                   all = TRUE)  %>% 
+    filter(sensor_node != "18") # remove plot 18, since it was an outlier (and was only surveyed in 2017)
+    
+veg_spread <- veg_pheno %>% 
+    filter(multi.hit_or_top.hit == "top-hit") %>%
+    select(-Note, -USDA_code, -category, -group, - growth_habit, -corrected_NWT_name) %>% 
+    spread(species, abundance)
+
+# Separate the data into a Veg df and a Meta df
+Veg <- veg_spread %>% 
+    select(ACHMIL:Willow_sp)
+
+Meta <- veg_spread %>% 
+    select(sensor_node:los)
+
+# We need to replace all blank spaces (NA) with zeros in the Veg dataframe:
+Veg[is.na(Veg)] <- 0 
+
+# We relativize the data using the "decostand" function. This will change the values to represent the relative portion of the total.
+Veg.rel <- decostand(Veg,"total")
+
+# Bray-Curtis dissimilarity
+Veg.rel.bray <- vegdist(Veg.rel, method="bray")
+```
+
+```{r community-clusters}
+#UMPGMA
+Veg.cluster <- agnes(Veg.rel.bray, 
+                     diss = TRUE, 
+                     method = "average", 
+                     keep.diss = TRUE)
+pltree(Veg.cluster, main = "pltree (UPGMA, average)", labels = Meta$sensor_node)
+
+# Nearest neighbor method
+Veg.cluster2 <- agnes(Veg.rel.bray, 
+                      diss = TRUE, 
+                      method = "single", 
+                      keep.diss = TRUE)
+pltree(Veg.cluster2, main = "pltree (nearest neighbor)", labels = Meta$sensor_node)
+
+# Furthest neighbor method
+Veg.cluster3 <- agnes(Veg.rel.bray, 
+                      diss = TRUE, 
+                      method = "complete", 
+                      keep.diss = TRUE)
+pltree(Veg.cluster3, main = "pltree (furthest neighbor)", labels = Meta$sensor_node)
+
+# Ward method
+Veg.cluster4 <- agnes(Veg.rel.bray, 
+                      diss=TRUE, 
+                      method="ward", 
+                      keep.diss=TRUE)
+pltree(Veg.cluster4, main = "pltree (ward)", labels = Meta$sensor_node)
+```
+
+```{r compare-correlation-of-trees}
+par(mfrow = c(2,2))
+
+# UPGMA method
+tree_dist <- cophenetic(Veg.cluster)
+plot(tree_dist, Veg.rel.bray)
+cor(tree_dist, Veg.rel.bray)
+
+# Nearest neighbor method
+tree_dist2 <- cophenetic(Veg.cluster2)
+plot(tree_dist2, Veg.rel.bray)
+cor(tree_dist2, Veg.rel.bray)
+
+# Furthest neighbor method
+tree_dist3 <- cophenetic(Veg.cluster3)
+plot(tree_dist3, Veg.rel.bray)
+cor(tree_dist3, Veg.rel.bray)
+
+# Ward method
+tree_dist4 <- cophenetic(Veg.cluster4)
+plot(tree_dist4, Veg.rel.bray)
+cor(tree_dist4, Veg.rel.bray)
+```
+
+```{r plot-dissimilarity-trees}
+par(mfrow = c(2,2))
+pltree(Veg.cluster, main = "pltree (UPGMA, average)", labels = Meta$sensor_node)
+pltree(Veg.cluster2, main = "pltree (nearest neighbor)", labels = Meta$sensor_node)
+pltree(Veg.cluster3, main = "pltree (furthest neighbor)", labels = Meta$sensor_node)
+pltree(Veg.cluster4, main = "pltree (ward)", labels = Meta$sensor_node)
+
+```
+
+```{r indicator-species}
+cut_tree <- cutree(Veg.cluster4, k=6)
+ind_species <- multipatt(Veg.rel, cut_tree, duleg=TRUE)
+summary(ind_species)
+str(ind_species)
+x <- ind_species$str
+a <- ind_species$A
+b <- ind_species$B
+x2 <- ind_species$sign
+
+indsp_df <- ind_species$sign %>% 
+    tibble::rownames_to_column("species") %>% 
+    arrange(index) %>% 
+    filter(p.value < 0.05)
+
+index_ID <- data.frame(index = c(1,2,3,4,5,6), 
+                          comm = c("DM1", "DM3", "MM", "WM", "DM2", "SA"))
+
+indsp_df2 <- merge(indsp_df, index_ID) %>% 
+    select(comm, species, p.value)
+
+usda_names <- read.csv("../nwt_sennet_veg/master_data/pspecies.mw.data_sennet.csv") %>% 
+    select(sennet_code, corrected_NWT_name)
+
+indsp_df3 <- merge(indsp_df2, usda_names,
+                   by.x = "species", by.y = "sennet_code") %>% 
+    arrange(comm)
+
+# indsp_df3 %>% filter(comm == "SA") %>% pull(corrected_NWT_name)
+```
+
+```{r permanova_comm}
+# Is there a significant difference between the communities?
+
+# First check for dispersion. Dispersion should NOT be significant between communities in order to perform a PERMANOVA. (I.e. we WANT the p-values to be > 0.05).
+
+# Dispersion
+Veg.disper_comm <- betadisper(Veg.rel.bray, Meta$Comm_ClusterWard)
+anova(Veg.disper_comm)
+permutest(Veg.disper_comm)
+TukeyHSD(Veg.disper_comm)
+
+permanova_comm <- adonis(Veg.rel ~ Comm_ClusterWard,
+                         strata = Meta$sensor_node,
+                         data = Meta,
+                         permutations = 999,
+                         method = "bray",
+                         na.action = na.omit)
+permanova_comm
+
+```
+
+```{r nmds-by-comm}
+set.seed(08211989)
+Veg.nmds <- metaMDS(Veg.rel, k=2, try = 100)
+Veg.nmds$stress # 0.171
+stressplot(Veg.nmds, Veg.rel.bray)
+Veg.nmds
+
+Veg.nmds_species_df <- as.data.frame(Veg.nmds$species) %>% 
+    tibble::rownames_to_column("species")
+Veg.nmds_sp_priority <- merge(Veg.nmds_species_df, indsp_df)
+
+x <- ordiellipse(Veg.nmds, Meta$Comm_ClusterWard, kind="se", conf=0.95)
+plots <- paste(Meta$sensor_node)
+par(mfrow = c(1,1))
+ordiplot(Veg.nmds, 
+         type="n", 
+         main = "NMDS by Plant Community and \nSoil Moisture Minimum (2017)",
+         cex = 1)
+with (Meta, ordiellipse(Veg.nmds, Meta$Comm_ClusterWard, kind="se", conf=0.95, col="darkseagreen", lwd=2, label=TRUE))
+
+# orditorp (Veg.nmds, display="species", col="grey30", air=0.01, cex = 0.3)
+orditorp (Veg.nmds, 
+          display="sites", 
+          label = plots, 
+          col="black", 
+          air=0.01, cex = 1)
+orditorp (Veg.nmds, 
+          display="sites", 
+          label = plots, 
+          col="black", 
+          air=0.01, cex = 1)
+with(Meta, orditorp (Veg.nmds, 
+                     display= "species",
+                     select = Veg.nmds_sp_priority$p.value < 0.05,
+                     col="grey50",
+                     air=0.01, cex = 0.5))
+# with (Meta, ordiellipse(Veg.nmds, sensor_node, kind="se", conf=0.95, col="turquoise4", lwd=2, label=TRUE))
+with (Meta, ordisurf(Veg.nmds, Meta$MinSoilM_2017, add = TRUE, col = "thistle"))
+# with (Meta, ordisurf(Veg.nmds, Meta$SnowmeltDOY_2017, add = TRUE, col = "darkorchid4"))
+
+# with (Meta, ordisurf(Veg.nmds, Meta$sm5cm_gs_mean, add = TRUE, col = "darkorchid4"))
+# with (Meta, ordisurf(Veg.nmds, Meta$sm5cm_gs_min, add = TRUE, col = "deeppink"))
+# with (Meta, ordisurf(Veg.nmds, Meta$sm30cm_gs_mean, add = TRUE, col = "darkorchid4"))
+# with (Meta, ordisurf(Veg.nmds, Meta$stemp5_gs_mean, add = TRUE, col = "darkorchid4"))
+# with (Meta, ordisurf(Veg.nmds, Meta$cover, add = TRUE, col = "darkorchid4"))
+# with (Meta, ordisurf(Veg.nmds, Meta$sm30cm_gs_min, add = TRUE, col = "darkorchid4"))
+
+
+```
+
+### 1. Predict that intermediate meadows (MM) would be more responsive than dry/wet meadows (Walker et al. 1995)
+
+```{r create-pheno_change_df}
+pheno_change <- phenodates %>% 
+    group_by(phenocam) %>% 
+    summarise(los_change = los[1] - los[2],
+              sos_min_change = sos_min[1] - sos_min[2],
+              peak_change = peak[1] - peak[2],
+              eos_75_change = eos_75[1] - eos_75[2],
+              eos_10_change = eos_10[1] - eos_10[2])
+
+pheno_change_comm <- merge(pheno_change, communities, by.x = "phenocam", by.y = "plot") %>% 
+    filter(phenocam != "18")
+
+pheno_change_comm$comms_ordered <- factor(pheno_change_comm$Comm_ClusterWard, 
+                                      levels = c("SA", "WM", "MM", "DM3", "DM2", "DM1"))
+
+```
+
+a.	Lme(phenodate change from 2017 to 2018 ~ community)
+
+#### a. sos_min
+Subalpine and moist meadow changed in sos_min significantly more than dry meadow and wet meadow.
+```{r sos_min_change_smcomm}
+lme_guchange_comm1 <- lme(sos_min_change ~ Comm_ClusterWard, 
+                         data = pheno_change_comm,
+                         random = ~1|phenocam,
+                         method = "REML",
+                         na.action = na.exclude)
+
+summary(lme_guchange_comm1)
+# coef(lme_dorm_comm)
+Anova(lme_guchange_comm1)
+anova(lme_guchange_comm1)
+#intervals(lme_guchange_comm1)
+x = residuals(lme_guchange_comm1)
+plotNormalHistogram(x)
+plot(fitted(lme_guchange_comm1),
+     residuals(lme_guchange_comm1))
+
+sos_min_change_plot <- ggplot(data = pheno_change_comm, 
+                              aes(y = sos_min_change, 
+                                  x = comms_ordered,
+                                  color = comms_ordered)) + 
+    geom_hline(mapping = aes(yintercept = 0)) + 
+    geom_boxplot(fill = "#a6d96a", alpha = 0.5, 
+                 outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    geom_jitter(width = 0.2) + 
+    coord_flip() + 
+    scale_color_manual(name = "Plant Community",
+                       values = comm_cols,
+                       breaks = c("DM1", "DM2", "DM3", "MM", "WM", "SA"), 
+                       labels = c("Dry Meadow 1 (DM1)", "Dry Meadow 2 (DM2)", "Dry Meadow 3 (DM3)", "Moist Meadow (MM)", "Wet Meadow (WM)", "Subalpine (SA)"),
+                       guide = FALSE) +
+    labs(x = "", 
+         y = "",
+         subtitle = "Greenup") + 
+    scale_y_continuous(limits = c(-40, 25)) + 
+    theme_bw() + 
+    theme(text = element_text(size=20))
+
+```
+
+```{r sos_change_by_comm}
+aggregate(sos_min_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = mean)
+aggregate(sos_min_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = calcSE)
+aggregate(sos_min_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = length)
+
+```
+
+#### b. peak
+No significant difference in peak date change among communities from 2017 - 2018
+```{r peak}
+lme_matchange_comm1 <- lme(peak_change ~ Comm_ClusterWard, 
+                         data = pheno_change_comm,
+                         random = ~1|phenocam,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_matchange_comm1)
+anova(lme_matchange_comm1)
+
+mat_change_plot <- ggplot(data = pheno_change_comm, 
+                          aes(y = peak_change, 
+                              x = comms_ordered, 
+                              color = comms_ordered)) + 
+    scale_color_manual(name = "Plant Community",
+                       values = comm_cols,
+                       breaks = c("DM1", "DM2", "DM3", "MM", "WM", "SA"), 
+                       labels = c("Dry Meadow 1 (DM1)", "Dry Meadow 2 (DM2)", "Dry Meadow 3 (DM3)", "Moist Meadow (MM)", "Wet Meadow (WM)", "Subalpine (SA)"),
+                       guide = FALSE) + 
+    geom_hline(mapping = aes(yintercept = 0)) + 
+    geom_boxplot(fill = "#1a9641", alpha = 0.5, 
+                 outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    geom_jitter(width = 0.2) + 
+    coord_flip() + 
+    scale_y_continuous(limits = c(-40, 25)) + 
+    theme_bw() + 
+    theme(text = element_text(size=20)) + 
+    labs(x = "", 
+         y = "",
+         subtitle = "Maturity")
+
+```
+
+```{r peak_change_by_comm}
+aggregate(peak_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = mean)
+aggregate(peak_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = calcSE)
+aggregate(peak_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = length)
+
+```
+
+#### c. eos_75
+No significant difference in eos_75 change among communities from 2017 - 2018
+```{r eos_75}
+# eos_75
+lme_senchange_comm1 <- lme(eos_75_change ~ Comm_ClusterWard, 
+                         data = pheno_change_comm,
+                         random = ~1|phenocam,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_senchange_comm1)
+anova(lme_senchange_comm1)
+# TukeyHSD(lme_senchange_comm1)
+
+sen_change_plot <- ggplot(data = pheno_change_comm, 
+                          aes(y = eos_75_change, 
+                              x = comms_ordered, 
+                              color = comms_ordered)) + 
+    geom_hline(mapping = aes(yintercept = 0)) + 
+    geom_boxplot(fill = "#fdae61", alpha = 0.5,
+                 outlier.shape = 1) + 
+    geom_jitter(width = 0.2) + 
+    coord_flip() + 
+    scale_color_manual(name = "Plant Community",
+                       values = comm_cols,
+                       breaks = c("DM1", "DM2", "DM3", "MM", "WM", "SA"), 
+                       labels = c("Dry Meadow 1 (DM1)", "Dry Meadow 2 (DM2)", "Dry Meadow 3 (DM3)", "Moist Meadow (MM)", "Wet Meadow (WM)", "Subalpine (SA)"), 
+                       guide = FALSE) +
+    labs(x = "", 
+         y = "",
+         subtitle = "Senescence") + 
+    scale_y_continuous(limits = c(-40, 25)) + 
+    theme_bw() + 
+    theme(text = element_text(size=20))
+
+```
+
+```{r eos_75_change_by_comm}
+aggregate(eos_75_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = mean)
+aggregate(eos_75_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = calcSE)
+aggregate(eos_75_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = length)
+
+```
+
+#### d. eos_10
+Significantly greater shift in eos_10 change in moist meadows and subalpine, compared to dry meadows
+```{r eos_10_shift_by_comm}
+# change in eos_10 based on community type
+lme_dormchange_comm1 <- lme(eos_10_change ~ Comm_ClusterWard, 
+                         data = pheno_change_comm,
+                         random = ~1|phenocam,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_dormchange_comm1)
+anova(lme_dormchange_comm1)
+Anova(lme_dormchange_comm1)
+
+eos_10_change_plot <- ggplot(data = pheno_change_comm, 
+                               aes(y = eos_10_change, 
+                                   x = comms_ordered, 
+                                   color = comms_ordered)) + 
+    geom_hline(mapping = aes(yintercept = 0)) + 
+    geom_boxplot(fill = "#d7191c", alpha = 0.5, 
+                 outlier.shape = 1, outlier.size = 2) + 
+    geom_jitter(width = 0.2) + 
+    coord_flip() + 
+    scale_color_manual(name = "Plant Community",
+                       values = comm_cols,
+                       breaks = c("DM1", "DM2", "DM3", "MM", "WM", "SA"), 
+                       labels = c("Dry Meadow 1 (DM1)", "Dry Meadow 2 (DM2)", "Dry Meadow 3 (DM3)", "Moist Meadow (MM)", "Wet Meadow (WM)", "Subalpine (SA)"),
+                       guide = FALSE) +
+    labs(x = "",
+         y = "Change in phenophase date\nin 2018 compared to 2017 (days)",
+         subtitle = "Dormancy") +
+    scale_y_continuous(limits = c(-40, 25)) + 
+    theme_bw() + 
+    theme(text = element_text(size=20))
+
+```
+
+```{r eos_10_change_by_comm}
+aggregate(eos_10_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = mean)
+aggregate(eos_10_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = calcSE)
+aggregate(eos_10_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = length)
+
+```
+
+```{r los_change_by_comm}
+aggregate(los_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = mean)
+aggregate(los_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = calcSE)
+aggregate(los_change ~ Comm_ClusterWard, data = pheno_change_comm, FUN = length)
+
+summary(aov(los_change ~ Comm_ClusterWard, data = pheno_change_comm))
+```
+
+```{r all_phenodates_change_plot, fig.width=12, fig.height=8}
+grid.arrange(sos_min_change_plot, mat_change_plot, sen_change_plot, eos_10_change_plot, 
+             nrow=4, 
+             left = grid::textGrob("Plant Community Type",
+                             gp=grid::gpar(fontsize = 22), 
+                             rot = 90),
+             heights = c(3,3,3,3.5))
+```
+
+
+```{r pheno_change_gather_and_ttest}
+pheno_change_gather <- pheno_change %>% 
+    gather(key = "phenodate", value = "change", 3:6)
+
+pheno_change_aov <- aov(change ~ phenodate, data = pheno_change_gather)
+summary(pheno_change_aov)
+TukeyHSD(pheno_change_aov)
+
+pheno_change_means <- aggregate(change ~ phenodate, data = pheno_change_gather, FUN = mean) %>% 
+    rename(mean_change = change)
+pheno_change_se <- aggregate(change ~ phenodate, data = pheno_change_gather, FUN = calcSE) %>% 
+    rename(se_change = change)
+pheno_change_n <- aggregate(change ~ phenodate, data = pheno_change_gather, FUN = length)
+pheno_change_stats <- merge(pheno_change_means, pheno_change_se)
+pheno_change_stats
+
+```
+
+```{r shift_in_phenodate_bar, eval = FALSE}
+
+# The SE bars aren't currently working
+pheno_change_gather2 <- merge(pheno_change_gather, pheno_change_stats)
+ggplot(pheno_change_stats) +
+    geom_col(aes(x = phenodate, y = mean_change)) + 
+    geom_errorbar(data = pheno_change_stats, aes(ymin = mean_change - se_change, ymax = mean_change + se_change),
+                  width=.2)
+```
+b.	Evidence supports Walker et al. 1995
+
+### 2. Lme(length of season change ~ community)
+
+a.	Sørenson 1941: periodic v. aperiodic species
+
+b.	Could the Sorenson paradigm apply to communities?
+
+c.	No evidence that length of season differed between communities
+
+#### a. LOS
+
+No significant difference in length of season among communities from 2017 - 2018
+
+```{r season_length_smcomm}
+# length of season
+lme_loschange_comm1 <- lme(los_change ~ Comm_ClusterWard, 
+                         data = pheno_change_comm,
+                         random = ~1|phenocam ,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_loschange_comm1)
+anova(lme_loschange_comm1)
+
+los_plot <- ggplot(data = pheno_change_comm, 
+                               aes(y = los_change, 
+                                   x = comms_ordered, 
+                                   color = comms_ordered)) + 
+    geom_hline(mapping = aes(yintercept = 0)) + 
+    geom_boxplot(fill = "#d7191c", alpha = 0.5, 
+                 outlier.shape = 1, outlier.size = 2) + 
+    geom_boxplot() + 
+    geom_jitter(width = 0.2) + 
+    coord_flip() + 
+    scale_color_manual(name = "Plant Community",
+                       values = c("olivedrab", "dodgerblue4", "skyblue2", "goldenrod2", "goldenrod", "goldenrod3"),
+                       breaks = c("DM1", "DM2", "DM3", "MM", "WM", "SA"), 
+                       labels = c("Dry Meadow 1 (DM1)", "Dry Meadow 2 (DM2)", "Dry Meadow 3 (DM3)", "Moist Meadow (MM)", "Wet Meadow (WM)", "Subalpine (SA)")) +
+    labs(x = "Plant Community Type", 
+         y = "Change in length of season (2018 - 2017)", 
+         title = "Length of season (sos_min to eos_10)") + 
+    scale_y_continuous(limits = c(-40, 25)) + 
+    theme_bw() + 
+    theme(text = element_text(size=20))
+los_plot
+```
+
+## iii. Do moisture gradients (indicated in the NMDS) explain the differences
+
+Community types (NMDS & PERMANOVA)
+
+1.	PERMANOVA(plots ~ soil moisture mean/25th/10th)
+
+```{r soil_moisture_by_comm}
+Meta_2018 <- Meta %>% 
+    filter(year == 2018)
+sm_comm_boxplot <- ggplot(data = Meta_2018, 
+                        aes(x = as.factor(Comm_ClusterWard),
+                            y = sm5cm_gs_min_3day10,
+                            fill = as.factor(Comm_ClusterWard))) + 
+    facet_wrap(~ year) + 
+    scale_fill_manual(name = "Community",
+                       values = comm_cols) +
+    scale_color_manual(name = "Phenocam",
+                       values = plot_cols_comm) +    
+    geom_jitter(width = 0.1, aes(color = as.factor(sensor_node))) + 
+    geom_boxplot(alpha = 0.5, outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    labs(x = "Community Type", y = "Soil Moisture\n Growing Season Minimum\n(3 day 10th percentile, VWC)")  + 
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=45, hjust=0.5))
+sm_comm_boxplot 
+```
+
+```{r permanova_sm_NOT_RUN, eval = FALSE}
+permanova_sm_mean <- adonis(Veg.rel ~ sm5cm_gs_mean,
+                         strata = Meta$sensor_node,
+                         data = Meta,
+                         permutations = 999,
+                         method = "bray",
+                         na.action = na.omit)
+permanova_sm_mean
+```
+
+```{r soiltemp_by_comm}
+Meta_2018 <- Meta %>% 
+    filter(year == 2018)
+stemp_comm_boxplot <- ggplot(data = Meta_2018, 
+                        aes(x = as.factor(Comm_ClusterWard),
+                            y = stemp5_gs_mean,
+                            fill = as.factor(Comm_ClusterWard))) + 
+    facet_wrap(~ year) + 
+    geom_jitter(width = 0.1, aes(color = as.factor(sensor_node))) + 
+    scale_fill_manual(name = "Community",
+                       values = comm_cols) +
+    scale_color_manual(name = "Phenocam",
+                       values = plot_cols_comm) +    
+    geom_boxplot(alpha = 0.5, outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    labs(x = "Community Type", y = "Soil Temperature\n Growing Season Mean\n(5 cm, degC)")  + 
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=45, hjust=0.5))
+stemp_comm_boxplot 
+```
+
+2.	Lm(phenodates ~ soil moisture mean/25th/10th)
+
+3.	Lm(length of season ~ soil moisture mean/25th/10th)
+
+4. Lme(max greenness ~ community type)
+
+```{r maxgreen_by_comm}
+lme_maxgreen_comm <- lme(max_greenness ~ Comm_ClusterWard, 
+                         data = green_summary_comm,
+                         random = ~1|phenocam,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_maxgreen_comm)
+anova(lme_maxgreen_comm)
+
+
+maxgreen_comm_boxplot <- ggplot(data = green_summary_comm, 
+                        aes(x = as.factor(Comm_ClusterWard),
+                            y = max_greenness,
+                            fill = as.factor(Comm_ClusterWard))) + 
+    facet_wrap(~ year) + 
+    geom_jitter(width = 0.1, aes(color = as.factor(phenocam))) + 
+    scale_fill_manual(name = "Community",
+                       values = comm_cols) +
+    scale_color_manual(name = "Phenocam",
+                       values = plot_cols_comm) +    
+    geom_boxplot(alpha = 0.5, outlier.alpha = 1, outlier.shape = 1, outlier.size = 2) + 
+    labs(x = "Community Type", y = "Max Greenness (GCC)")  + 
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=45, hjust=0.5))
+maxgreen_comm_boxplot 
+```
+
+5.	Anova(phenodates ~ soil moisture groups)
+
+# Q3: Does species composition affect phenology?
+
+## i. Does diversity increase the length of the season?
+
+1.	Predict that more diverse plots will have longer growing seasons
+```{r species_diversity-calc}
+source("functions/shannon-diversity-index.R")
+
+plot_list <- c("6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "19", "20", "21") 
+
+diversity_2017 <- shannon_div(veg, 2017, plot_list)
+diversity_2018 <- shannon_div(veg, 2018, plot_list)
+
+diversity <- rbind(diversity_2017, diversity_2018)
+
+diversity_pheno <- merge(phenodates, diversity, by.x = c("phenocam", "year"), by.y = c("sensor_node", "year"))
+```
+
+2.	lme(length of season ~ diversity) = not significant
+```{r lme_los_diversity}
+# length of season
+lme_los_comm1 <- lme(los ~ diversity_shannon, 
+                         data = diversity_pheno,
+                         random = ~1|phenocam,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_los_comm1)
+anova(lme_los_comm1)
+
+summary(lm(los ~ diversity_shannon, data = subset(diversity_pheno, year == 2017)))
+summary(lm(los ~ diversity_shannon, data = subset(diversity_pheno, year == 2018)))
+```
+
+```{r ggplot_diversity}
+
+ggplot(data = diversity_pheno) + 
+    geom_point(aes(x = diversity_shannon,
+                  y = los, 
+                  group = as.factor(phenocam)),
+               size = 2) +  
+    # ylim(0.3, 0.5) + 
+    # scale_color_hue(name = "Phenocam") +
+    scale_color_manual(name = "Phenocam", values = plot_cols_comm, breaks = plot_list) + 
+    # scale_linetype(name = "Year") + 
+    facet_wrap(~ year, nrow = 1) + 
+    labs(title = "",
+         x = "Diversity", 
+         y = "Length of Season (days)") +
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=0, hjust=0.5))
+
+```
+
+3.	lme(length of season ~ richness)
+
+```{r lme_richness_diversity}
+veg_richness_pheno <- merge(phenodates, veg2,
+                            by.x = c("phenocam", "year"), by.y = c("sensor_node", "year"))
+# length of season & richness
+lme_los_richness <- lme(los ~ richness, 
+                         data = veg_richness_pheno,
+                         random = ~1|phenocam,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_los_richness)
+anova(lme_los_richness)
+Anova(lme_los_richness)
+
+summary(lm(los ~ richness, data = subset(veg_richness_pheno, year == 2017)))
+summary(lm(los ~ richness, data = subset(veg_richness_pheno, year == 2018)))
+```
+
+```{r ggplot_richness_los}
+
+ggplot(data = veg_richness_pheno) + 
+    geom_point(aes(x = richness,
+                  y = los, 
+                  group = as.factor(phenocam)),
+               size = 2) +  
+    # ylim(0.3, 0.5) + 
+    # scale_color_hue(name = "Phenocam") +
+    scale_color_manual(name = "Phenocam", values = plot_cols_comm, breaks = plot_list) + 
+    # scale_linetype(name = "Year") + 
+    facet_wrap(~ year, nrow = 1) + 
+    labs(title = "",
+         x = "Richness", 
+         y = "Length of Season (days)") +
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=0, hjust=0.5))
+
+```
+
+## ii. Does functional diversity increase the length of the growing season?
+
+```{r fxl_diversity_calc}
+veg_functional <- veg %>% 
+    # filter(multi.hit_or_top.hit != "multi-hit") %>%
+    group_by(sensor_node, year, multi.hit_or_top.hit, growth_habit) %>% 
+    summarize(functional_abundance = sum(abundance)) %>% 
+    filter(functional_abundance != 0)
+
+veg_functional_tophit <- veg_functional %>% 
+    filter(multi.hit_or_top.hit == "top-hit")
+
+shannon_div_fxl(veg_functional_tophit, 2017, plot_list)
+shannon_div_fxl(veg_functional_tophit, 2018, plot_list)
+
+fxl_diversity <- rbind(fxl_div_2017, fxl_div_2018)
+fxl_div_pheno <- merge(phenodates, fxl_diversity, 
+                       by.x = c("phenocam", "year"), 
+                       by.y = c("sensor_node", "year"))
+```
+
+
+1.	lme(length of season ~ functional diversity)
+No relationship
+```{r los_v_fxl_diversity}
+# length of season & richness
+lme_los_fxl_div <- lme(los ~ diversity_shannon, 
+                         data = fxl_div_pheno,
+                         random = ~1|phenocam/year,
+                         method = "ML",
+                         na.action = na.exclude)
+summary(lme_los_fxl_div)
+anova(lme_los_fxl_div)
+
+summary(lm(los ~ diversity_shannon, data = subset(fxl_div_pheno, year == 2017)))
+summary(lm(los ~ diversity_shannon, data = subset(fxl_div_pheno, year == 2018)))
+```
+
+```{r ggplot_fxl_diversity}
+
+ggplot(data = fxl_div_pheno) + 
+    geom_point(aes(x = diversity_shannon,
+                  y = los, 
+                  group = as.factor(phenocam)),
+               size = 2) +  
+    # ylim(0.3, 0.5) + 
+    # scale_color_hue(name = "Phenocam") +
+    scale_color_manual(name = "Phenocam", values = plot_cols_comm, breaks = plot_list) + 
+    # scale_linetype(name = "Year") + 
+    facet_wrap(~ year, nrow = 1) + 
+    labs(title = "",
+         x = "Functional Diversity", 
+         y = "Length of Season (days)") +
+    theme_bw() + 
+    theme(text = element_text(size=20),
+        axis.text.x = element_text(angle=0, hjust=0.5))
+
+```
+
+
+# Saddle data: 
+
+```{r load-saddle-and-d1-data}
+saddle_temp <- read.csv("data_master/saddle/sdltdayv.ml.data.csv") %>% 
+    mutate(date = as.Date(date))
+saddle_precip <- read.csv("data_master/saddle/sdlpdayv.ml.data.csv") %>% 
+    mutate(date = as.Date(date))
+
+d1_temp <- read.csv("data_master/saddle/d-1tdayv.ml.data.csv") %>% 
+    mutate(date = as.Date(date))
+
+# structure
+str(saddle_temp)
+str(saddle_precip)
+str(d1_temp)
+```
+
+```{r temp_and_precip_manipulation}
+saddle_temp_2017 <- saddle_temp %>% 
+    filter(year(date) == 2017)
+saddle_temp_2018 <- saddle_temp %>% 
+    filter(year(date) == 2018)
+
+# D1 temp
+d1_temp_2017 <- d1_temp %>% 
+    filter(year(date) == 2017) %>% 
+    mutate(doy = yday(date))
+
+d1_temp_2018 <- d1_temp %>% 
+    filter(year(date) == 2018) %>% 
+    mutate(doy = yday(date))
+
+# Water year: D1 Temp
+d1_temp_wy2017 <- d1_temp %>% 
+    filter(date >= "2016-10-01") %>% 
+    filter(date < "2017-10-01") %>% 
+    mutate(wdoy = seq(from = 1, to = 365),
+           doy = yday(date))
+
+d1_temp_wy2018 <- d1_temp %>% 
+    filter(date >= "2017-10-01") %>% 
+    filter(date < "2018-10-01") %>% 
+    mutate(wdoy = seq(from = 1, to = 365),
+           doy = yday(date))
+
+d1_temp_wy2017and2018 <- rbind(d1_temp_wy2017, d1_temp_wy2018)
+
+
+# Water year: Saddle precip
+saddle_precip_wy2017 <- saddle_precip %>% 
+    filter(date >= "2016-10-01") %>% 
+    filter(date < "2017-10-01") %>% 
+    mutate(water_year = 2017,
+           wdoy = seq(from = 1, to = 365),
+           doy = yday(date))
+
+saddle_precip_wy2018 <- saddle_precip %>% 
+    filter(date >= "2017-10-01") %>% 
+    filter(date < "2018-10-01") %>% 
+    mutate(water_year = 2018,
+           wdoy = seq(from = 1, to = 365),
+           doy = yday(date))
+
+saddle_precip_wy2017and2018 <- rbind(saddle_precip_wy2017, saddle_precip_wy2018)
+
+```
+
+### D1 temperature
+```{r d1_temp_ggplot}
+# Max temp
+ggplot() + 
+    geom_point(data = d1_temp_2017, aes(x = doy, y = airtemp_max)) + 
+    geom_smooth(data = d1_temp_2017, aes(x = doy, y = airtemp_max), 
+                color = "red") + 
+    geom_point(data = d1_temp_2018, aes(x = doy, y = airtemp_max)) + 
+    geom_smooth(data = d1_temp_2018, aes(x = doy, y = airtemp_max))
+
+# Min temp
+ggplot() + 
+    geom_point(data = d1_temp_2017, aes(x = doy, y = airtemp_min)) + 
+    geom_smooth(data = d1_temp_2017, aes(x = doy, y = airtemp_min), 
+                color = "red") + 
+    geom_point(data = d1_temp_2018, aes(x = doy, y = airtemp_min)) + 
+    geom_smooth(data = d1_temp_2018, aes(x = doy, y = airtemp_min))
+
+# Avg temp
+ggplot() + 
+    geom_point(data = d1_temp_2017, aes(x = doy, y = airtemp_avg)) + 
+    geom_smooth(data = d1_temp_2017, aes(x = doy, y = airtemp_avg), 
+                color = "red") + 
+    geom_path(data = d1_temp_2017, aes(x = doy, y = airtemp_avg), 
+                color = "red")
+    # geom_point(data = d1_temp_2018, aes(x = doy, y = airtemp_avg)) + 
+    # geom_smooth(data = d1_temp_2018, aes(x = doy, y = airtemp_avg))
+```
+
+```{r tdd_d1}
+# First day above 0 degC minimum temp
+first_thaw_2017_min <- d1_temp_2017 %>% 
+    filter(airtemp_min > 0) %>% 
+    arrange(date) %>% 
+    slice(1)
+first_thaw_2017_min
+
+first_thaw_2018_min <- d1_temp_2018 %>% 
+    filter(airtemp_min > 0) %>% 
+    arrange(date) %>% 
+    slice(1)
+first_thaw_2018_min
+
+# Last day above 0 degC maximum temp
+first_frost_2017_max <- d1_temp_2017 %>% 
+    filter(airtemp_max < 0, 
+           date > "2017-07-01") %>% 
+    arrange(date) %>% 
+    slice(1)
+
+first_frost_2018_max <- d1_temp_2018 %>% 
+    filter(airtemp_max < 0, 
+           date > "2018-07-01") %>% 
+    arrange(date) %>% 
+    slice(1)
+
+# Day of maximum temp
+max_temp_2017 <- d1_temp_2017 %>% 
+    arrange(-airtemp_avg) %>% 
+    slice(1)
+
+max_temp_2018 <- d1_temp_2018 %>% 
+    arrange(-airtemp_avg) %>% 
+    slice(1)
+
+# TDD from Oct. 1 to first thaw ()
+tdd_winter_2017 <- d1_temp_wy2017 %>% 
+    filter(date < first_thaw_2017_min$date) %>% 
+    summarise(tdd_winter = sum(airtemp_avg, na.rm = TRUE))
+tdd_winter_2018 <- d1_temp_wy2018 %>% 
+    filter(date < first_thaw_2018_min$date) %>% 
+    summarise(tdd_winter = sum(airtemp_avg, na.rm = TRUE))
+
+# TDD from Jan. 1 to first thaw ()
+tdd_jantothaw_2017 <- d1_temp_2017 %>% 
+    filter(date < first_thaw_2017_min$date) %>% 
+    summarise(tdd_jantothaw = sum(airtemp_avg, na.rm = TRUE))
+tdd_jantothaw_2018 <- d1_temp_2018 %>% 
+    filter(date < first_thaw_2018_min$date) %>% 
+    summarise(tdd_jantothaw = sum(airtemp_avg, na.rm = TRUE))
+
+# Jan. 1 to June 1
+tdd_jantojun_2017 <- d1_temp_2017 %>% 
+    filter(date < "2017-06-01") %>% 
+    summarise(tdd_jantojun = sum(airtemp_avg, na.rm = TRUE))
+tdd_jantojun_2018 <- d1_temp_2018 %>% 
+    filter(date < "2018-06-01") %>% 
+    summarise(tdd_jantojun = sum(airtemp_avg, na.rm = TRUE))
+
+# March, April, May
+tdd_martomay_2017 <- d1_temp_2017 %>% 
+    filter(date >= "2017-03-01",
+           date <= "2017-05-31") %>% 
+    summarise(tdd_martomay = sum(airtemp_avg, na.rm = TRUE))
+tdd_martomay_2017
+
+tdd_martomay_2018 <- d1_temp_2018 %>% 
+    filter(date >= "2018-03-01",
+           date <= "2018-05-31") %>% 
+    summarise(tdd_martomay = sum(airtemp_avg, na.rm = TRUE))
+tdd_martomay_2018
+
+# First thaw to first frost
+tdd_thawtofrost_2017 <- d1_temp_2017 %>% 
+    filter(date >= first_thaw_2017_min$date, 
+           date < first_frost_2017_max$date)
+nrow(tdd_thawtofrost_2017)
+sum(tdd_thawtofrost_2017$airtemp_avg, na.rm = TRUE)
+
+tdd_thawtofrost_2018 <- d1_temp_2018 %>% 
+    filter(date >= first_thaw_2018_min$date, 
+           date < first_frost_2018_max$date)
+nrow(tdd_thawtofrost_2018)
+sum(tdd_thawtofrost_2018$airtemp_avg, na.rm = TRUE)
+
+# June, July, August
+tdd_juntoaug_2017 <- d1_temp_2017 %>% 
+    filter(date >= "2017-06-01",
+           date <= "2017-08-31") %>% 
+    summarise(tdd_jantojun = sum(airtemp_avg, na.rm = TRUE))
+
+tdd_juntoaug_2018 <- d1_temp_2018 %>% 
+    filter(date >= "2018-06-01",
+           date <= "2018-08-31") %>% 
+    summarise(tdd_jantojun = sum(airtemp_avg, na.rm = TRUE))
+
+```
+
+### Saddle precipitation
+
+```{r precip}
+# Winter precip: Oct - first thaw
+precip_winter2017 <- saddle_precip_wy2017 %>% 
+    filter(date < first_thaw_2017_min$date) %>% 
+    summarise(winter_precip = sum(ppt_tot, na.rm = TRUE))
+precip_winter2017
+
+precip_winter2018 <- saddle_precip_wy2018 %>% 
+    filter(date < first_thaw_2018_min$date) %>% 
+    summarise(winter_precip = sum(ppt_tot, na.rm = TRUE))
+precip_winter2018
+
+# Late spring precip: April - first thaw
+precip_apriltothaw_2017 <- saddle_precip_wy2017 %>% 
+    filter(date > "2017-04-15",
+           date < first_thaw_2017_min$date) %>% 
+    summarise(latespring_precip = sum(ppt_tot, na.rm = TRUE))
+precip_maytothaw_2017
+
+precip_apriltothaw_2018 <- saddle_precip_wy2018 %>% 
+    filter(date > "2018-04-15",
+           date < first_thaw_2018_min$date) %>% 
+    summarise(latespring_precip = sum(ppt_tot, na.rm = TRUE))
+precip_maytothaw_2018
+
+# Winter precip 2: Oct. to June
+precip_octtojun_2017 <- saddle_precip_wy2017 %>% 
+    filter(date < "2017-06-01") %>% 
+    summarise(octtojun_precip = sum(ppt_tot, na.rm = TRUE))
+precip_octtojun_2017
+
+precip_octtojun_2018 <- saddle_precip_wy2018 %>% 
+    filter(date < "2018-06-01") %>% 
+    summarise(octtojun_precip = sum(ppt_tot, na.rm = TRUE))
+precip_octtojun_2018
+
+# Thaw free season (gs) precip: First thaw to first freeze
+precip_gs_2017 <- saddle_precip_wy2017 %>% 
+    filter(date >= first_thaw_2017_min$date,
+           date <= first_frost_2017_max$date) %>% 
+    summarise(gs_precip = sum(ppt_tot, na.rm = TRUE))
+precip_gs_2017
+
+precip_gs_2018 <- saddle_precip_wy2018 %>% 
+    filter(date >= first_thaw_2018_min$date,
+           date <= first_frost_2018_max$date) %>% 
+    summarise(gs_precip = sum(ppt_tot, na.rm = TRUE))
+precip_gs_2018
+
+# Summer precip: JJA
+precip_summer_2017 <- saddle_precip_wy2017 %>% 
+    filter(date >= "2017-06-01",
+           date < "2017-09-01") %>% 
+    summarise(summer_precip = sum(ppt_tot, na.rm = TRUE))
+precip_summer_2017
+
+precip_summer_2018 <- saddle_precip_wy2018 %>% 
+    filter(date >= "2018-06-01",
+           date < "2018-09-01") %>% 
+    summarise(summer_precip = sum(ppt_tot, na.rm = TRUE))
+precip_summer_2018
+
+```
+
+```{r precip_ggplot}
+saddle_precip_wy2017and2018 <- saddle_precip_wy2017and2018 %>% 
+    mutate(month = month(date, label = TRUE, abbr = TRUE)) %>% 
+    mutate(season = ifelse(month(date) >= 12 | month(date) < 3, "1_Winter", 
+                           ifelse(month(date) >= 3 & month(date) < 6, "2_Spring",
+                                  ifelse(month(date) >= 6 & month(date) < 9, "3_Summer",
+                                         ifelse(month(date) >= 9 & month(date) < 12, "4_Fall", NA)))))
+    
+saddle_precip_wy2017and2018$month <- factor(saddle_precip_wy2017and2018$month, levels = c("Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"))
+                                                
+ggplot(data = saddle_precip_wy2017and2018, aes(x = month, y = ppt_tot)) + 
+    geom_bar(aes(fill = as.factor(water_year)), position = "dodge", stat="identity") + 
+    scale_fill_manual(name = "Water Year", values = c("2017" = "black", "2018" = "grey50")) + 
+    labs(title = "Precipitation at Saddle", 
+         x = "Month", y = "Precipitation total (mm)") +
+    theme_bw() + 
+    theme(text = element_text(size=10),
+        axis.text.x = element_text(angle=0, hjust=0.5))
+
+ggplot(data = saddle_precip_wy2017and2018, aes(x = month, y = ppt_tot)) + 
+    geom_bar(aes(fill = as.factor(water_year)), position = "dodge", stat="identity") + 
+    scale_fill_manual(name = "Water Year", values = c("2017" = "black", "2018" = "grey50")) + 
+    labs(title = "Precipitation at Saddle", 
+         x = "Month", y = "Precipitation total (mm)") +
+    theme_bw() + 
+    theme(text = element_text(size=10),
+        axis.text.x = element_text(angle=0, hjust=0.5))
+
+ggplot(data = saddle_precip_wy2017and2018, aes(x = season, y = ppt_tot)) + 
+    geom_bar(aes(fill = as.factor(water_year)), position = "dodge", stat="identity") + 
+    scale_fill_manual(name = "Water Year", values = c("2017" = "black", "2018" = "grey50")) + 
+    scale_x_discrete(labels = c("Winter", "Spring", "Summer", "Fall")) + 
+    labs(title = "Precipitation at Saddle", 
+         x = "Season", y = "Precipitation total (mm)") +
+    theme_bw() + 
+    theme(text = element_text(size=10),
+        axis.text.x = element_text(angle=0, hjust=0.5))
+```
+
+```{r site characteristics}
+# Yearly average precip
+precip_yearly_totals <- saddle_precip %>% 
+    mutate(water_year = ifelse(month(date) >= 10, year(date) + 1, year(date))) %>% 
+    group_by(water_year) %>% 
+    summarise(wy_total = sum(ppt_tot, na.rm = TRUE)) %>% 
+    filter(water_year != min(water_year),
+           water_year != max(water_year))
+
+mean(precip_yearly_totals$wy_total)
+
+# Mean temperature at Saddle
+saddle_temp_yearlyavg <- saddle_temp %>% 
+    mutate(year = year(date)) %>% 
+    group_by(year) %>% 
+    summarise(mean_temp = mean(airtemp_avg, na.rm = TRUE)) %>% 
+    filter(year != min(year),
+           year != max(year))
+
+saddle_firstthaw <- saddle_temp %>% 
+    mutate(doy = yday(date),
+           year = year(date)) %>% 
+    filter(airtemp_min > 0) %>% 
+    arrange(date) %>% 
+    group_by(year) %>% 
+    summarise(first_thaw = min(doy))
+
+as.Date(mean(saddle_firstthaw$first_thaw), origin = "2018-12-31")
+    
+saddle_firstfreeze <- saddle_temp %>% 
+    mutate(doy = yday(date),
+           year = year(date)) %>% 
+    filter(month(date) > 7,
+           airtemp_max < 0) %>% 
+    arrange(date) %>% 
+    group_by(year) %>% 
+    summarise(first_freeze = min(doy))
+
+as.Date(mean(saddle_firstfreeze$first_freeze), origin = "2018-12-31")
+
+mean(saddle_temp_yearlyavg$mean_temp)
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
+

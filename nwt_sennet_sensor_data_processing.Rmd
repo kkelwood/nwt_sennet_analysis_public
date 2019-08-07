@@ -1,0 +1,223 @@
+---
+title: "Environmental Data from SenNet Sensors"
+author: "Kelsey Elwood"
+date: "2/14/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r}
+library(dplyr) # for data manipulation (pipes)
+library(ggplot2)
+```
+
+# Load data
+```{r}
+source("functions/read_sensor_data.R")
+
+data_list <- list.files(path = "../sennet_data/", full.names = TRUE)
+sapply(data_list, read_sensor_data)
+```
+
+# Merge & filter data
+```{r}
+source("functions/filter_by_season.R")
+
+sensor_data_list <- objects(pattern = "sensor_")
+
+# Adjust this to only include the sensor files (not other lists, etc.)
+sensor_data_list <- sensor_data_list[3:18]
+
+```
+
+
+```{r}
+for(i in sensor_data_list) {
+    colnames_i <- colnames(get(i))
+    if("snowdepth" %in% colnames_i) {print(paste(i))}
+}
+
+for(i in sensor_data_list) {
+    temp_df <- get(i)
+    colnames_i <- colnames(get(i))
+    
+    if("snowdepth" %in% colnames_i) {print(paste(i))}
+    if("snowdepth" %in% colnames_i) {colnames(temp_df)[colnames(temp_df) == 'snowdepth'] <- 'dts'}
+    if("snowdepth_Std" %in% colnames_i) {colnames(temp_df)[colnames(temp_df) == 'snowdepth_Std'] <- 'dts_Std'}
+    assign(i, temp_df, envir = globalenv())
+}
+```
+
+```{r}
+# Write as csv files to master data list
+for(i in sensor_data_list) {
+    write.csv(get(i), paste0("data_master/sensor_data/", i, ".csv"))
+}
+```
+
+```{r create-daily-and-weekly-summary-dfs}
+source("functions/data_summaries_by_week_or_by_day.R")
+source("functions/sensor_summary_3day90th.R")
+
+for(i in sensor_data_list) {
+    daily_summary_3day90th(get(i))
+    print(paste("Finished summarizing", i))
+}
+
+
+```
+
+```{r merge-daily-and-weekly-summaries}
+# Merge daily summary
+summary_list <- objects(pattern = "_3day90th")
+summary_list <- summary_list[3:18]
+all_sensors_3day90th <- get(summary_list[1])
+for(i in 2:length(summary_list)) {
+    temp_df <- get(summary_list[i])
+    # if(i == 1) {assign("all_sensors_daily", temp_df, envir = globalenv())}
+    # if(i > 1) {merge(all_sensors_daily, temp_df)}
+    all_sensors_3day90th <- rbind(all_sensors_3day90th, temp_df)
+}
+str(all_sensors_3day90th)
+write.csv(all_sensors_3day90th, file = "data_master/sensor_summaries_3day90th.csv", row.names = FALSE)
+
+
+# Merge daily summary
+daily_data_list <- objects(pattern = "_daily_summary")
+all_sensors_daily <- get(daily_data_list[1])
+for(i in 2:length(daily_data_list)) {
+    temp_df <- get(daily_data_list[i])
+    # if(i == 1) {assign("all_sensors_daily", temp_df, envir = globalenv())}
+    # if(i > 1) {merge(all_sensors_daily, temp_df)}
+    all_sensors_daily <- rbind(all_sensors_daily, temp_df)
+}
+str(all_sensors_daily)
+write.csv(all_sensors_daily, file = "data_master/sensor_daily_summaries.csv", row.names = FALSE)
+
+# Merge weekly summary
+weekly_data_list <- objects(pattern = "_weekly_summary")
+all_sensors_weekly <- get(weekly_data_list[1])
+for(i in 2:length(weekly_data_list)) {
+    temp_df <- get(weekly_data_list[i])
+    all_sensors_weekly <- rbind(all_sensors_weekly, temp_df)
+}
+str(all_sensors_weekly)
+write.csv(all_sensors_weekly, file = "data_master/sensor_weekly_summaries.csv")
+
+```
+
+```{r plot_daily_data}
+# soil moisture
+p_sm_daily <- ggplot(data = all_sensors_daily, aes(x = DAY)) + 
+    geom_line(aes(y = sm5b_daily_avg, color = "5 cm (avg)"), alpha = 0.5, size = 1) +
+    geom_line(aes(y = sm5b_daily_min, color = "5 cm (min)"), alpha = 0.5, size = 1) +
+    geom_line(aes(y = sm30b_daily_avg, color = "30 cm (avg)"), alpha = 0.5, size = 1) +
+    geom_line(aes(y = sm30b_daily_min, color = "30 cm (min)"), alpha = 0.5, size = 1) +
+    facet_wrap(~sensor) + 
+    ylim(-0.1,1.5) +
+    # geom_point(aes(color="My points"))
+    # scale_fill_manual(name = "Sensor depth", values = c("5 cm" = "tan", "30 cm" = "tan4")) +
+    scale_color_manual(name = "Sensor depth", 
+                       values = c("5 cm (avg)" = "royalblue4",
+                                  "5 cm (min)" = "royalblue",
+                                  "30 cm (avg)" = "orangered4",
+                                  "30 cm (min)" = "orangered")) +
+    # theme(legend.position="top") +
+    labs(title = "Soil Moisture (B)", 
+         y = "Soil Moisture (VWC)")
+p_sm_daily    
+
+```
+
+```{r}
+soilM_dates <- all_sensors_3day90th %>% 
+    filter(sm5cm_3day90th > 0,
+           sm5cm_3day90th < 1,
+           DATE > "2018-01-01") %>% 
+    group_by(phenocam) %>% 
+    summarise(spring_thaw_date = min(DATE),
+              fall_freeze_date = max(DATE)) %>% 
+    mutate(thawed_los = as.Date(fall_freeze_date) - as.Date(spring_thaw_date))
+```
+
+# Soil Temperature
+```{r}
+# soil temperature
+p_temp_daily <- ggplot(data = all_sensors_daily, aes(x = DAY)) + 
+    geom_line(aes(y = stemp5_daily_avg, color = "5 cm"), alpha = 0.5, size = 1) +
+    geom_line(aes(y = stemp30_daily_avg, color = "30 cm"), alpha = 0.5, size = 1) +
+    geom_smooth(aes(y = air_daily_avg, color = "Air Temperature"), alpha = 0.5, size = 1) +
+    geom_hline(aes(yintercept = 0), color = "black") + 
+    geom_vline(aes(yintercept = 0), color = "black") + 
+    geom_hline(aes(yintercept = 0), color = "black") + 
+    facet_wrap(~sensor) + 
+    ylim(-10,20) +
+    # scale_fill_manual(name = "Sensor depth", values = c("5 cm" = "tan", "30 cm" = "tan4")) +
+    scale_color_manual(name = "Sensor depth", 
+                       values = c("5 cm" = "black", 
+                                  "30 cm" = "grey",
+                                  "Air Temperature" = "blue")) +
+    # theme(legend.position="top") +
+    labs(title = "Temperature")
+p_temp_daily  
+
+```
+
+```{r soilT_dates}
+soilT_dates <- all_sensors_3day90th %>% 
+    filter(stemp5_3day90th > 0,
+           phenocam != 17,
+           DATE > "2018-01-01") %>% 
+    group_by(phenocam) %>% 
+    summarise(spring_thaw_date = min(DATE),
+              fall_freeze_date = max(DATE)) %>% 
+    mutate(thawed_los = as.Date(fall_freeze_date) - as.Date(spring_thaw_date),
+           spring_thaw_date_J = as.numeric(strftime(spring_thaw_date, format = "%j")),
+           fall_freeze_date_J = as.numeric(strftime(fall_freeze_date, format = "%j")))
+    
+sennet_summary2 <- merge(sennet_summary, soilT_dates, by = "phenocam")
+
+hist(as.numeric(soilT_dates$thawed_los))
+hist(as.numeric(soilT_dates$spring_thaw_date_J))
+hist(as.numeric(soilT_dates$thawed_los))
+hist(as.numeric(soilT_dates$thawed_los))
+
+```
+
+```{r}
+# snowdepth
+p_snow_daily <- ggplot(data = all_sensors_daily, aes(x = DAY)) + 
+    geom_line(aes(y = snowdepth_daily_avg/1000), alpha = 0.5, size = 1) +
+    facet_wrap(~sensor) + 
+    # ylim(-10,20) +
+    # geom_point(aes(color="My points"))
+    # scale_fill_manual(name = "Sensor depth", values = c("5 cm" = "tan", "30 cm" = "tan4")) +
+    # scale_color_manual(name = "Sensor depth", 
+                       # values = c("5 cm" = "black", 
+                       #            "30 cm" = "grey")) +
+    # theme(legend.position="top") +
+    labs(title = "Snow Depth")
+p_snow_daily  
+
+```
+
+```{r}
+# 
+p_snow_daily <- ggplot(data = all_sensors_daily, aes(x = DAY)) + 
+    geom_line(aes(y = snowdepth_daily_avg/1000), alpha = 0.5, size = 1) +
+    facet_wrap(~sensor) + 
+    # ylim(-10,20) +
+    # geom_point(aes(color="My points"))
+    # scale_fill_manual(name = "Sensor depth", values = c("5 cm" = "tan", "30 cm" = "tan4")) +
+    # scale_color_manual(name = "Sensor depth", 
+                       # values = c("5 cm" = "black", 
+                       #            "30 cm" = "grey")) +
+    # theme(legend.position="top") +
+    labs(title = "Snow Depth")
+p_snow_daily  
+
+```
