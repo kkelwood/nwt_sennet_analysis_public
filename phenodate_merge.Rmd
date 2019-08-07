@@ -1,0 +1,32 @@
+---
+title: "merge_phenodates"
+author: "Kelsey Elwood"
+date: "2/14/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load all phenodate files
+```{r}
+phenodate_files_2018 <- list.files(path = "../nwt_sennet_phenocams/camera_imagery_2018/subset9to1/", pattern = "phenophase_dates_", recursive = TRUE, full.names = TRUE)
+
+sapply(phenodate_files_2018, merge)
+
+# Load in existing phenophase csv file
+phenophase_df <- read.csv(file = phenodate_files_2018[1])
+for (i in 2:length(phenodate_files_2018)) {
+    phenophase_new <- read.csv(file = phenodate_files_2018[i])
+    # Add new phenophase dates to old csv file
+    phenophase_df <- rbind(phenophase_df2, phenophase_new)
+}
+
+
+# Save combined file
+write.csv(phenophase_df, 
+          file = "",
+          row.names = FALSE)
+```
+
